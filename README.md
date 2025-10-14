@@ -1,259 +1,293 @@
-# VLC Discord Bot 🎬
+# 🎬 Discord VLC Media Player Bot
 
-A comprehensive Discord bot that provides full remote control for VLC Media Player with an elegant interface, persistent status tracking, playlist management, and advanced user permissions.
-
-![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
-![Discord.py](https://img.shields.io/badge/discord.py-2.0+-green.svg)
-![License](https://img.shields.io/badge/license-MIT-blue.svg)
+A powerful Discord bot that provides complete control over VLC Media Player through an interactive interface. Control your VLC playback directly from Discord with beautiful embeds, button controls, and real-time status updates.
 
 ## ✨ Features
 
-### 🎮 Complete Media Controls
-- **Play/Pause/Stop**: Full playback control with user tracking
-- **Seek Controls**: Jump forward/backward by 10 seconds
-- **Playlist Navigation**: Previous/Next track with permission controls
-- **Real-time Status**: Live updates every 6 seconds with progress bars
+### 🎮 Interactive Controls
+- **Button-based Interface**: Easy-to-use button controls (no slash commands needed)
+- **Real-time Updates**: Status updates every 6 seconds automatically
+- **Spotify-style Progress Bar**: Visual progress tracking with timestamps
+- **Media Information**: Automatic movie/TV show information scraping from IMDb
 
-### 📊 Rich Status Display
-- **Spotify-style Progress Bar**: Visual progress indication with timestamps
-- **Comprehensive Media Info**: Title, artist, album, duration, bitrate
-- **Playlist Information**: Shows current position and upcoming tracks
-- **Connection Status**: Real-time VLC connection monitoring
+### 🎵 Playback Controls
+- ▶️ **Play/Pause**: Start and stop media playback
+- ⏭️/⏮️ **Next/Previous**: Navigate through playlist items
+- ⏪/⏩ **Seek Controls**: Jump backward/forward by 10 seconds
+- 🔄 **Refresh**: Manually update the status display
 
-### 👥 Advanced User Management
-- **Role-based Permissions**: Configurable role requirements for bot access
-- **Admin Controls**: Special permissions for seeking and playlist management
-- **Pause Protection**: Only the person who paused (or admin) can resume
-- **Button Cooldowns**: Prevents spam and accidental rapid commands
+### 📋 Playlist Management
+- **Playlist Display**: View current playlist with item names and positions
+- **Queue Information**: See what's playing next
+- **Playlist Navigation**: Jump to next/previous tracks easily
 
-### 📈 Activity Tracking
-- **Command History**: Track all user interactions with timestamps
-- **User Statistics**: Monitor most active users and total actions
-- **Persistent Logging**: File-based logging with configurable levels
+### 📊 Advanced Features
+- **User Activity Tracking**: Monitor who's controlling the player
+- **Command History**: Track recent user actions
+- **Statistics Display**: View bot usage statistics
+- **Admin Controls**: Role-based permissions and overrides
+- **Connection Monitoring**: Automatic VLC reconnection handling
 
-### 🔧 Configuration Management
-- **Environment Variables**: Secure configuration via `.env` file
-- **Customizable Colors**: Embed colors for different playback states
-- **Flexible Updates**: Configurable update intervals and display options
-- **Auto-reconnection**: Automatic VLC reconnection with retry logic
+### 🛡️ Security & Permissions
+- **Role-based Access**: Restrict bot usage to specific roles
+- **Admin-only Features**: Limit seeking and playlist controls to admins
+- **Cooldown System**: Prevent button spam with configurable cooldowns
+- **Pause Protection**: Only the person who paused (or admins) can resume
 
-## 🚀 Quick Start
+### 🎨 Customization
+- **Themed Embeds**: Color-coded status based on playback state
+- **Rich Media Info**: Movie posters, ratings, and plot summaries
+- **Bot Status Updates**: Shows current playing media in bot's status
+- **Configurable Display**: Customize progress bar length, colors, and more
+
+## 📦 Installation
 
 ### Prerequisites
+
 - Python 3.8 or higher
 - VLC Media Player with HTTP interface enabled
 - Discord Bot Token
 
-### Installation
+### Required Dependencies
 
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/yourusername/vlc-discord-bot.git
-   cd vlc-discord-bot
-   ```
+Install all required packages using pip:
 
-2. **Install dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
+```bash
+pip install discord.py python-dotenv aiohttp requests beautifulsoup4
+```
+Or install through requirements file:
 
-3. **Setup VLC HTTP Interface**
-   - Open VLC → Tools → Preferences
-   - Click "Show settings: All" (bottom left)
-   - Navigate to Interface → Main interfaces
-   - Check "Web"
-   - Go to Interface → Main interfaces → Lua
-   - Set HTTP password (remember this for .env)
+```bash
+pip install -r requirements.txt
+```
+
+### Individual Package Descriptions
+
+- **discord.py**: Discord API wrapper for Python
+- **python-dotenv**: Load environment variables from .env file
+- **aiohttp**: Asynchronous HTTP client for VLC API communication
+- **requests**: HTTP library for web requests
+- **beautifulsoup4**: HTML parsing for media information scraping
+
+### VLC Setup
+
+1. **Enable VLC HTTP Interface:**
+   - Open VLC Media Player
+   - Go to `Tools` → `Preferences`
+   - Show settings: `All`
+   - Navigate to `Interface` → `Main interfaces`
+   - Check `Web`
+   - Go to `Interface` → `Main interfaces` → `Lua`
+   - Set password in `Lua HTTP` → `Password`
    - Restart VLC
 
-4. **Configure Environment Variables**
-   Create a `.env` file in the project directory:
-   ```env
-   # Discord Configuration
-   DISCORD_BOT_TOKEN=your_discord_bot_token_here
-   BOT_PREFIX=!
-   
-   # VLC Configuration
-   VLC_HOST=localhost
-   VLC_PORT=8080
-   VLC_PASSWORD=your_vlc_password
-   
-   # Channel Configuration
-   STATUS_CHANNEL_ID=123456789012345678
-   ALLOWED_GUILD_ID=123456789012345678
-   
-   # Optional: Role Configuration
-   REQUIRED_ROLE_ID=123456789012345678
-   
-   # Optional: Advanced Settings
-   UPDATE_INTERVAL=6
-   LOG_LEVEL=INFO
-   BOT_STATUS_TEXT=movies with friends
-   ```
+2. **Verify HTTP Interface:**
+   - Open browser and go to `http://localhost:8080`
+   - You should see VLC's web interface
 
-5. **Run the bot**
+### Discord Bot Setup
+
+1. **Create Discord Application:**
+   - Go to [Discord Developer Portal](https://discord.com/developers/applications)
+   - Click "New Application"
+   - Go to "Bot" section
+   - Click "Add Bot"
+   - Copy the bot token
+
+2. **Bot Permissions:**
+   Required permissions for the bot:
+   - Send Messages
+   - Use Slash Commands
+   - Embed Links
+   - Read Message History
+   - Add Reactions
+
+3. **Invite Bot to Server:**
+   - Go to "OAuth2" → "URL Generator"
+   - Select "bot" and "applications.commands"
+   - Select the required permissions above
+   - Use the generated URL to invite the bot
+
+## ⚙️ Configuration
+
+Create a `.env` file in the same directory as the bot:
+
+```env
+# Required Settings
+DISCORD_BOT_TOKEN=your_discord_bot_token_here
+VLC_PASSWORD=your_vlc_password_here
+STATUS_CHANNEL_ID=your_discord_channel_id_here
+
+# Optional VLC Settings
+VLC_HOST=localhost
+VLC_PORT=8080
+
+# Optional Discord Settings
+BOT_PREFIX=!
+ALLOWED_GUILD_ID=your_server_id_here
+REQUIRED_ROLE_ID=role_id_for_bot_access
+
+# Bot Status Customization
+BOT_STATUS_TYPE=watching
+BOT_STATUS_TEXT=movies with friends
+SHOW_PROGRESS_IN_STATUS=true
+UPDATE_INTERVAL=6
+
+# Security Settings
+ADMIN_ONLY_SEEK=false
+ADMIN_ONLY_PLAYLIST=false
+PAUSE_COOLDOWN=2
+BUTTON_COOLDOWN=1
+
+# Visual Customization
+EMBED_COLOR_PLAYING=0x00ff00
+EMBED_COLOR_PAUSED=0xff8c00
+EMBED_COLOR_STOPPED=0xff0000
+EMBED_COLOR_ERROR=0x800080
+PROGRESS_BAR_LENGTH=25
+SHOW_THUMBNAIL=true
+
+# Advanced Features
+ENABLE_RICH_PRESENCE=true
+AUTO_RECONNECT_VLC=true
+MAX_RECONNECT_ATTEMPTS=5
+RECONNECT_DELAY=10
+ENABLE_MEDIA_INFO_SCRAPING=true
+SCRAPING_TIMEOUT=10
+
+# Logging
+LOG_LEVEL=INFO
+LOG_TO_FILE=true
+LOG_FILE=vlc_bot.log
+```
+
+### Configuration Options Explained
+
+#### Required Settings
+- `DISCORD_BOT_TOKEN`: Your Discord bot token
+- `VLC_PASSWORD`: Password set in VLC HTTP interface
+- `STATUS_CHANNEL_ID`: Discord channel where the control panel will be posted
+
+#### VLC Connection
+- `VLC_HOST`: VLC server host (default: localhost)
+- `VLC_PORT`: VLC HTTP interface port (default: 8080)
+
+#### Security & Permissions
+- `ALLOWED_GUILD_ID`: Restrict bot to specific server (optional)
+- `REQUIRED_ROLE_ID`: Role required to use bot controls (optional)
+- `ADMIN_ONLY_SEEK`: Only admins can seek (true/false)
+- `ADMIN_ONLY_PLAYLIST`: Only admins control playlist (true/false)
+
+#### Visual Customization
+- `EMBED_COLOR_*`: Hex colors for different playback states
+- `PROGRESS_BAR_LENGTH`: Length of progress bar (default: 25)
+- `SHOW_THUMBNAIL`: Show movie/TV posters (true/false)
+
+## 🚀 Usage
+
+### Starting the Bot
+
+1. **Run the bot:**
    ```bash
-   python start.py
+   python main.py
    ```
 
-## 📋 Requirements
+2. **Setup the bot in specific channel:**
+   - Copy Server's ID and put in .env file
+   - Copy Channel's ID and put it in .env file
 
-Create a `requirements.txt` file with the following dependencies:
+### Button Controls
 
-```
-discord.py>=2.0.0
-python-dotenv>=0.19.0
-aiohttp>=3.8.0
-requests>=2.28.0
-```
+The bot provides an interactive control panel with the following buttons:
 
-## 🎛️ Commands
+#### Row 1: Main Controls
+- **⏮️ Previous**: Go to previous track in playlist
+- **⏪ -10s**: Seek backward 10 seconds
+- **⏸️ Pause**: Pause playback
+- **▶️ Play**: Resume playback
+- **+10s ⏩**: Seek forward 10 seconds
 
-### Slash Commands
-- `/setup` - Initialize the VLC control panel (Admin only)
-- `/who_paused` - See who last paused the playbook
-- `/force_play` - Force resume playbook (Admin only)
-- `/playlist` - Display current playlist information
+#### Row 2: Additional Features
+- **⏭️ Next**: Go to next track in playlist
+- **📊 Stats**: View bot usage statistics
+- **📜 History**: See recent command history
+- **🔄 Refresh**: Manually refresh the status display
 
-### Interactive Controls
-The bot provides an always-visible control panel with buttons for:
-- **⏮️ Previous Track** - Go to previous item in playlist
-- **⏪ -10s** - Seek backward 10 seconds
-- **⏸️ Pause** - Pause playback
-- **▶️ Play** - Resume playback
-- **+10s ⏩** - Seek forward 10 seconds
-- **⏭️ Next Track** - Go to next item in playlist
-- **📊 Stats** - View bot and user statistics
-- **📜 History** - View recent command history
-- **🔄 Refresh** - Manually refresh status
+### Bot Features in Action
 
-## ⚙️ Configuration Options
+#### Rich Media Information
+The bot automatically scrapes movie and TV show information from IMDb, displaying:
+- Movie/TV show titles and posters
+- Plot summaries
+- Ratings and genres
+- Release years
 
-### Discord Settings
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `DISCORD_BOT_TOKEN` | Your Discord bot token | Required |
-| `BOT_PREFIX` | Command prefix for text commands | `!` |
-| `STATUS_CHANNEL_ID` | Channel for persistent status embed | None |
-| `ALLOWED_GUILD_ID` | Restrict bot to specific server | None |
+#### Smart Playlist Display
+- Shows current position in playlist (e.g., "3/15")
+- Displays current track and upcoming items
+- Clean filename formatting (removes quality tags, etc.)
 
-### VLC Connection
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `VLC_HOST` | VLC server hostname | `localhost` |
-| `VLC_PORT` | VLC HTTP interface port | `8080` |
-| `VLC_PASSWORD` | VLC HTTP interface password | Empty |
+#### User Activity Tracking
+- Tracks who controls the player
+- Shows command history
+- Displays usage statistics
+- Maintains pause permissions (only pauser or admin can resume)
 
-### Security & Permissions
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `REQUIRED_ROLE_ID` | Role required to use bot | None |
-| `ADMIN_ONLY_SEEK` | Restrict seeking to admins | `false` |
-| `ADMIN_ONLY_PLAYLIST` | Restrict playlist controls to admins | `false` |
-| `PAUSE_COOLDOWN` | Cooldown between pause commands (seconds) | `2` |
-| `BUTTON_COOLDOWN` | Cooldown between button presses (seconds) | `1` |
-
-### Display & Updates
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `UPDATE_INTERVAL` | Status update frequency (seconds) | `6` |
-| `SHOW_PROGRESS_IN_STATUS` | Show progress in bot status | `true` |
-| `PROGRESS_BAR_LENGTH` | Length of progress bar | `25` |
-| `BOT_STATUS_TYPE` | Bot activity type (watching/playing/listening) | `watching` |
-| `BOT_STATUS_TEXT` | Default bot status text | `movies with friends` |
-
-### Logging
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `LOG_LEVEL` | Logging level (DEBUG/INFO/WARNING/ERROR) | `INFO` |
-| `LOG_TO_FILE` | Enable file logging | `true` |
-| `LOG_FILE` | Log file path | `vlc_bot.log` |
-
-### Advanced Features
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `AUTO_RECONNECT_VLC` | Auto-reconnect to VLC on failure | `true` |
-| `MAX_RECONNECT_ATTEMPTS` | Maximum reconnection attempts | `5` |
-| `RECONNECT_DELAY` | Delay between reconnection attempts (seconds) | `10` |
-
-### Embed Customization
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `EMBED_COLOR_PLAYING` | Embed color when playing (hex) | `0x00ff00` |
-| `EMBED_COLOR_PAUSED` | Embed color when paused (hex) | `0xff8c00` |
-| `EMBED_COLOR_STOPPED` | Embed color when stopped (hex) | `0xff0000` |
-| `EMBED_COLOR_ERROR` | Embed color for errors (hex) | `0x800080` |
-
-## 🔒 Security Features
-
-### Role-Based Access Control
-- Configure `REQUIRED_ROLE_ID` to restrict bot usage
-- Admin-only commands for sensitive operations
-- Separate permissions for seeking and playlist controls
-
-### Pause Protection System
-- Only the user who paused can resume (or admins)
-- Persistent tracking of pause actions
-- Anti-spam measures with configurable cooldowns
-
-### Connection Security
-- Secure VLC authentication with password protection
-- Automatic connection monitoring and recovery
-- Error handling to prevent crashes
-
-## 🐛 Troubleshooting
+## 🔧 Troubleshooting
 
 ### Common Issues
 
-**Bot can't connect to VLC**
-- Ensure VLC HTTP interface is enabled
-- Check VLC_HOST and VLC_PORT in .env
-- Verify VLC_PASSWORD matches VLC settings
-- Try accessing `http://localhost:8080` in browser
+1. **Bot can't connect to VLC:**
+   - Ensure VLC HTTP interface is enabled and running on port 8080
+   - Check that the password in `.env` matches VLC settings
+   - Verify VLC is running and has media loaded
 
-**Commands not working**
-- Check bot permissions in Discord server
-- Verify ALLOWED_GUILD_ID is correct
-- Ensure STATUS_CHANNEL_ID exists and bot can access it
+2. **Bot doesn't respond to buttons:**
+   - Check bot permissions (Send Messages, Embed Links)
+   - Verify the bot is online and connected
+   - Check console logs for error messages
 
-**Status not updating**
-- Check UPDATE_INTERVAL setting
-- Verify bot has permission to edit messages
-- Look for errors in bot logs
+3. **Media information not showing:**
+   - Set `ENABLE_MEDIA_INFO_SCRAPING=true` in .env
+   - Check internet connection for IMDb scraping
+   - Some media files may not have available information
 
-**Permission errors**
-- Check REQUIRED_ROLE_ID configuration
-- Verify admin permissions for restricted commands
-- Review role hierarchy in Discord server
+4. **Buttons show "Application did not respond":**
+   - Check button cooldown settings in .env
+   - Verify bot has proper permissions
+   - Check VLC connection status
 
-### Debug Mode
-Enable debug logging by setting `LOG_LEVEL=DEBUG` in your `.env` file for detailed troubleshooting information.
+### Logs and Debugging
+
+The bot creates detailed logs in `vlc_bot.log` (if `LOG_TO_FILE=true`). Check this file for:
+- Connection errors
+- Media scraping issues
+- User action tracking
+- VLC API responses
+
+Set `LOG_LEVEL=DEBUG` for more detailed logging during troubleshooting.
 
 ## 🤝 Contributing
 
 1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+2. Create a feature branch
+3. Make your changes
+4. Test thoroughly
+5. Submit a pull request
 
-## 📝 License
+## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is open source. Feel free to modify and distribute according to your needs.
 
-## 🙏 Acknowledgments
+## 🆘 Support
 
-- Built with [discord.py](https://discordpy.readthedocs.io/)
-- VLC Media Player HTTP interface
-- Inspired by the need for seamless movie night controls
-
-## 📞 Support
-
-If you encounter any issues or have questions:
+If you encounter issues:
 1. Check the troubleshooting section above
-2. Look through existing [Issues](https://github.com/yourusername/vlc-discord-bot/issues)
-3. Create a new issue with detailed information about your problem
+2. Review the logs in `vlc_bot.log`
+3. Ensure all dependencies are correctly installed
+4. Verify VLC HTTP interface setup
+5. Check Discord bot permissions
 
 ---
 
-**Made with ❤️ for seamless movie nights and media sharing experiences!**
+**Enjoy controlling your VLC Media Player through Discord! 🎉**

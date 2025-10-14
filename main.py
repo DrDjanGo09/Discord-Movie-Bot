@@ -23,6 +23,8 @@ from dotenv import load_dotenv
 import aiohttp
 
 from pathlib import Path
+from bs4 import BeautifulSoup
+import re
 
 # Load environment variables
 
@@ -106,6 +108,10 @@ class Config:
     PROGRESS_BAR_LENGTH = int(os.getenv('PROGRESS_BAR_LENGTH', '25'))
 
     SHOW_THUMBNAIL = os.getenv('SHOW_THUMBNAIL', 'true').lower() == 'true'
+
+    # Web Scraping Configuration
+    ENABLE_MEDIA_INFO_SCRAPING = os.getenv('ENABLE_MEDIA_INFO_SCRAPING', 'true').lower() == 'true'
+    SCRAPING_TIMEOUT = int(os.getenv('SCRAPING_TIMEOUT', '10'))
 
 # Setup logging
 
@@ -289,6 +295,320 @@ vlc = VLCController(Config.VLC_HOST, Config.VLC_PORT, Config.VLC_PASSWORD)
 
 # Global state management
 
+class MediaScraper:
+    """Scrapes media information from public websites without API keys"""
+    
+    def __init__(self):
+        self.session = None
+        self.cache = {}
+        
+    async def _ensure_session(self):
+        if self.session is None or self.session.closed:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+            }
+            timeout = aiohttp.ClientTimeout(total=Config.SCRAPING_TIMEOUT)
+            self.session = aiohttp.ClientSession(timeout=timeout, headers=headers)
+    
+    async def extract_media_name(self, filename: str) -> str:
+        """Extract clean media name from filename for searching"""
+        if not filename or filename == "Unknown":
+            return ""
+    
+        # Remove file extension and get base name
+        name = os.path.splitext(filename)[0]
+    
+        # Common patterns to remove (both movie and TV show patterns)
+        patterns_to_remove = [
+            # Quality and format patterns
+            r'\b(?:brrip|webrip|webdl|web-dl|bluray|dvdrip|bdrip|hdtv)\b',
+            r'\b(?:x264|x265|hevc|avc|aac|ac3|ddp|dts)\b',
+            r'\b(?:1080p|720p|480p|4k|uhd|fhd|hd)\b',
+            r'\b(?:amzn|amazon|netflix|hulu|disney|hbo|max)\b',
+            r'\b(?:web|dl|download|stream|online)\b',
+        
+            # Release group patterns
+            r'\[.*?\]',  # Anything in brackets
+            r'\(.*?\)',  # Anything in parentheses (but be careful with years)
+        
+            # Special characters
+            r'[\._]',  # Replace dots and underscores with spaces
+        ]
+    
+        # Apply removal patterns
+        for pattern in patterns_to_remove:
+            name = re.sub(pattern, ' ', name, flags=re.IGNORECASE)
+    
+        # Clean up extra spaces
+        name = re.sub(r'\s+', ' ', name).strip()
+    
+        # Try to detect if it's a TV show and extract series name
+        tv_patterns = [
+            r'^(.*?)\s*[sS](\d{1,2})[eE](\d{1,2})',  # S01E01 format
+            r'^(.*?)\s*season\s*(\d{1,2})\s*episode\s*(\d{1,2})',  # Season 1 Episode 1
+            r'^(.*?)\s*(\d{1,2})[xX](\d{1,2})',  # 1x01 format
+        ]
+    
+        for pattern in tv_patterns:
+            match = re.search(pattern, name)
+            if match:
+                series_name = match.group(1).strip()
+                season_num = match.group(2)
+                episode_num = match.group(3)
+                logger.info(f"📺 Detected TV show: {series_name} S{season_num}E{episode_num}")
+                return series_name
+    
+        # For movies, try to preserve the year but clean everything else
+        movie_year_pattern = r'^(.*?)\s*\((\d{4})\)\s*$'
+        movie_match = re.search(movie_year_pattern, name)
+        if movie_match:
+            movie_name = movie_match.group(1).strip()
+            year = movie_match.group(2)
+            logger.info(f"🎬 Detected movie: {movie_name} ({year})")
+            return f"{movie_name} {year}"
+    
+        # Final cleanup - remove any remaining numbers that might be years at the end
+        name = re.sub(r'\s+\d{4}$', '', name)
+    
+        # If the name is still too long, take the first few words
+        words = name.split()
+        if len(words) > 5:
+            name = ' '.join(words[:4])  # Take first 4 words
+    
+        logger.info(f"🔧 Cleaned filename: '{filename}' -> '{name}'")
+        return name
+    
+    async def search_media_info(self, media_name: str) -> Dict[str, Any]:
+        """Search for media information using multiple strategies"""
+        if not Config.ENABLE_MEDIA_INFO_SCRAPING:
+            return {}
+        
+        cache_key = media_name.lower()
+        if cache_key in self.cache:
+            return self.cache[cache_key]
+    
+        clean_name = await self.extract_media_name(media_name)
+        if not clean_name:
+            return {}
+    
+        logger.info(f"🔍 Searching for media info: '{clean_name}' (original: '{media_name}')")
+    
+        try:
+            await self._ensure_session()
+        
+            # Strategy 1: Try exact search
+            info = await self._search_imdb_public(clean_name)
+        
+            # Strategy 2: If exact search fails, try without year
+            if not info:
+                name_without_year = re.sub(r'\s+\d{4}$', '', clean_name).strip()
+                if name_without_year != clean_name:
+                    logger.info(f"🔄 Trying search without year: '{name_without_year}'")
+                    info = await self._search_imdb_public(name_without_year)
+        
+            # Strategy 3: If still no results, try with just the first few words
+            if not info:
+                words = clean_name.split()
+                if len(words) > 3:
+                    simplified_name = ' '.join(words[:3])  # Just first 3 words
+                    logger.info(f"🔄 Trying simplified search: '{simplified_name}'")
+                    info = await self._search_imdb_public(simplified_name)
+        
+            # Strategy 4: Try alternative search methods
+            if not info:
+                info = await self._search_tmdb_alternative(clean_name)
+        
+            if info:
+                logger.info(f"✅ Found media info: {info.get('title', 'Unknown')}")
+                if info.get('plot'):
+                    logger.info(f"📖 Plot: {info['plot'][:100]}...")
+            else:
+                logger.warning(f"❌ No media info found after all strategies")
+            
+            self.cache[cache_key] = info
+            return info
+        
+        except Exception as e:
+            logger.error(f"Error scraping media info for '{clean_name}': {e}")
+            return {}
+    
+    async def _search_imdb_public(self, media_name: str) -> Dict[str, Any]:
+        """Search IMDb public website with improved selectors"""
+        try:
+            search_url = "https://www.imdb.com/find"
+            params = {
+                'q': media_name,
+                's': 'tt',
+                'ttype': 'ft,tv'  # Search for both feature films and TV
+            }
+        
+            async with self.session.get(search_url, params=params) as response:
+                if response.status == 200:
+                    html = await response.text()
+                    soup = BeautifulSoup(html, 'html.parser')
+                
+                    # Try multiple selectors for search results
+                    selectors = [
+                        'li.find-result-item',
+                        '.find-result',
+                        '.find-title-result',
+                        '[data-testid="find-results-section-title"] .ipc-metadata-list-summary-item',
+                        '.findSection:first-child .findList tr'  # Older IMDb layout
+                    ]
+                
+                    result = None
+                    for selector in selectors:
+                        results = soup.select(selector)
+                        if results:
+                            result = results[0]  # Take first result
+                            break
+                
+                    if not result:
+                        logger.warning(f"No IMDb results found for: {media_name}")
+                        return {}
+                
+                    # Extract title and link
+                    title_element = result.find('a') or result.select_one('a')
+                    if not title_element:
+                        return {}
+                
+                    title = title_element.get_text().strip()
+                    movie_link = title_element.get('href', '')
+                
+                    # Get image
+                    img_element = result.find('img') or result.select_one('img')
+                    image_url = img_element.get('src', '') if img_element else ""
+                
+                    # Determine if it's a TV show or movie
+                    media_type = 'movie'
+                    if 'series' in str(result).lower() or 'tv' in str(result).lower():
+                        media_type = 'tv'
+                
+                    # Get details from movie/TV page
+                    details = await self._get_imdb_details_public(movie_link) if movie_link else {}
+                
+                    return {
+                        'title': title,
+                        'image': image_url,
+                        'plot': details.get('plot', ''),
+                        'rating': details.get('rating', ''),
+                        'genre': details.get('genre', ''),
+                        'year': details.get('year', ''),
+                        'type': media_type
+                    }
+                else:
+                    logger.warning(f"IMDb search returned status: {response.status}")
+                    return {}
+                
+        except Exception as e:
+            logger.error(f"IMDb public search error: {e}")
+            return {}
+    
+    async def _get_imdb_details_public(self, movie_path: str) -> Dict[str, Any]:
+        """Get details from IMDb movie page with improved selectors"""
+        try:
+            if not movie_path.startswith('http'):
+                movie_path = f"https://www.imdb.com{movie_path}"
+                
+            async with self.session.get(movie_path) as response:
+                if response.status == 200:
+                    html = await response.text()
+                    soup = BeautifulSoup(html, 'html.parser')
+                    
+                    info = {}
+                    
+                    # Get plot with multiple selector attempts
+                    plot_selectors = [
+                        'span[data-testid="plot-l"]',
+                        '.plot_summary .summary_text',
+                        '.ipc-overflowText',
+                        '[data-testid="storyline-plot-summary"]'
+                    ]
+                    
+                    for selector in plot_selectors:
+                        plot_element = soup.select_one(selector)
+                        if plot_element:
+                            plot = plot_element.get_text().strip()
+                            if plot and plot not in ["Add a plot", "Plot summary"]:
+                                info['plot'] = plot
+                                break
+                    
+                    # Get rating with multiple selector attempts
+                    rating_selectors = [
+                        '[data-testid="hero-rating-bar__aggregate-rating__score"]',
+                        '.imdbRating span[class*="rating"]',
+                        '.ratingValue strong',
+                        '.sc-bde20123-1'
+                    ]
+                    
+                    for selector in rating_selectors:
+                        rating_element = soup.select_one(selector)
+                        if rating_element:
+                            rating_text = rating_element.get_text().strip()
+                            if rating_text:
+                                info['rating'] = rating_text
+                                break
+                    
+                    # Get genres
+                    genre_selectors = [
+                        '[data-testid="genres"] a',
+                        '.genres a',
+                        '.ipc-chip-list a'
+                    ]
+                    
+                    for selector in genre_selectors:
+                        genre_elements = soup.select(selector)
+                        if genre_elements:
+                            genres = [genre.get_text().strip() for genre in genre_elements[:3]]
+                            info['genre'] = ", ".join(genres)
+                            break
+                    
+                    # Get year
+                    year_selectors = [
+                        '[data-testid="hero-title-block__metadata"] li',
+                        '.title_wrapper .subtext a',
+                        '.sc-d8941411-1'
+                    ]
+                    
+                    for selector in year_selectors:
+                        year_element = soup.select_one(selector)
+                        if year_element:
+                            year_text = year_element.get_text().strip()
+                            if year_text and year_text.isdigit():
+                                info['year'] = year_text
+                                break
+                    
+                    return info
+                else:
+                    logger.warning(f"IMDb details returned status: {response.status}")
+                    return {}
+                    
+        except Exception as e:
+            logger.error(f"IMDb details error: {e}")
+            return {}
+    
+    async def _search_tmdb_alternative(self, media_name: str) -> Dict[str, Any]:
+        """Alternative search using TheMovieDB style (without API key)"""
+        try:
+            # This is a placeholder - you could implement alternative sources here
+            # For now, we'll return empty but you could add other public sites
+            return {}
+        except Exception as e:
+            logger.error(f"Alternative search error: {e}")
+            return {}
+    
+    async def close(self):
+        if self.session and not self.session.closed:
+            await self.session.close()
+
+# ADD THIS LINE:
+media_scraper = MediaScraper()
+
 class BotState:
 
     def __init__(self):
@@ -440,27 +760,17 @@ def create_progress_bar(position: float, length: int = None) -> str:
     return progress_bar
 
 def get_media_info(status_data: Dict) -> Dict:
-
     """Extract comprehensive media information"""
-
     info = {
-
         "filename": "Unknown",
-
         "title": "",
-
         "artist": "",
-
         "album": "",
-
         "duration": "",
-
         "bitrate": "",
-
         "codec": "",
-
-        "now_playing": ""
-
+        "now_playing": "",
+        "scraped_info": {}
     }
 
     if not status_data:
@@ -648,367 +958,272 @@ async def get_playlist_info() -> List[Dict]:
         return []
 
 async def create_vlc_embed(status_data: Optional[Dict] = None, last_action_by: str = None, action_type: str = None) -> discord.Embed:
-
     """Create comprehensive VLC status embed"""
 
     # Handle disconnected state
-
     if not status_data:
-
         embed = discord.Embed(
-
             title="🎬 VLC Player - Disconnected",
-
             description="❌ Cannot connect to VLC Media Player\n\n**Troubleshooting:**\n• Check VLC is running\n• Verify HTTP interface is enabled\n• Confirm password is correct",
-
             color=Config.EMBED_COLOR_ERROR,
-
             timestamp=datetime.now()
-
         )
-
         if vlc.last_error:
-
             embed.add_field(
-
                 name="🔧 Connection Error",
-
                 value=f"```{vlc.last_error[:200]}```",
-
                 inline=False
-
             )
-
         embed.add_field(
-
             name="🔗 Connection Info",
-
             value=f"**Host:** {Config.VLC_HOST}:{Config.VLC_PORT}\n**Attempts:** {vlc.connection_attempts}/{Config.MAX_RECONNECT_ATTEMPTS}",
-
             inline=True
-
         )
-
         return embed
 
     # Extract status information
-
     state_raw = status_data.get('state', 'unknown')
-
     position = status_data.get('position', 0)
-
     length = status_data.get('length', 0)
-
     volume = status_data.get('volume', 0)
 
     # Get media information
-
     media_info = get_media_info(status_data)
 
+    # FOR SCRAPING:
+    scraped_info = {}
+    if Config.ENABLE_MEDIA_INFO_SCRAPING and media_info['title'] and media_info['title'] != "Unknown":
+        logger.info(f"🎬 Attempting to scrape info for: {media_info['title']}")
+        scraped_info = await media_scraper.search_media_info(media_info['title'])
+        media_info['scraped_info'] = scraped_info
+        if scraped_info:
+            logger.info(f"✅ Scraped info: {scraped_info.get('title', 'Unknown')}")
+        else:
+            logger.warning("❌ No scraped info found")
+
     # Get playlist information
-
     playlist_info = await get_playlist_info()
-
     has_playlist = len(playlist_info) > 1  # More than current item
 
     # Calculate times
-
     current_seconds = position * length if length > 0 else 0
-
     total_seconds = length if length > 0 else 0
-
     remaining_seconds = max(0, total_seconds - current_seconds)
-
     current_time = seconds_to_time(current_seconds)
-
     total_time = seconds_to_time(total_seconds)
-
     remaining_time = seconds_to_time(remaining_seconds)
 
     # Create progress bar (full width)
-
     progress_bar = create_progress_bar(position) if length > 0 else create_progress_bar(0)
 
     # Determine embed color and state icon
-
     state_colors = {
-
         'playing': (Config.EMBED_COLOR_PLAYING, "▶️ Playing"),
-
         'paused': (Config.EMBED_COLOR_PAUSED, "⏸️ Paused"),
-
         'stopped': (Config.EMBED_COLOR_STOPPED, "⏹️ Stopped")
-
     }
-
     color, state_icon = state_colors.get(state_raw, (discord.Color.blue(), f"❓ {state_raw.title()}"))
 
-    # Create embed
-
-    embed = discord.Embed(
-
-        title="🎬 VLC Media Player",
-
-        color=color,
-
-        timestamp=datetime.now()
-
-    )
-
-    # Media title - use whatever we could extract
-
+    # ENHANCE TITLE AND DESCRIPTION:
     display_title = media_info['title']
+    if scraped_info and scraped_info.get('title'):
+        display_title = scraped_info['title']
 
+    # Start with title
+    description = f"**{display_title}**"
+    
+    # Add artist/album info if available (for music)
     if media_info['artist']:
-
         description = f"**{display_title}**\nby {media_info['artist']}"
-
         if media_info['album']:
-
             description += f"\n*from {media_info['album']}*"
 
-    else:
+    # Create embed
+    embed = discord.Embed(
+        title="🎬 VLC Media Player",
+        color=color,
+        timestamp=datetime.now()
+    )
 
-        description = f"**{display_title}**"
-
+    # Set the main description (title + artist info)
     embed.description = description
 
+    # ADD PLOT SUMMARY with smart truncation
+    if scraped_info and scraped_info.get('plot'):
+        plot = scraped_info['plot']
+        # Smart truncation - find natural breaking points
+        if len(plot) > 300:
+            # Try to break at the last sentence end before 300 characters
+            last_period = plot[:300].rfind('. ')
+            last_exclamation = plot[:300].rfind('! ')
+            last_question = plot[:300].rfind('? ')
+            
+            # Find the latest natural breaking point
+            break_point = max(last_period, last_exclamation, last_question)
+            
+            if break_point > 150:  # Ensure we have enough content
+                plot = plot[:break_point + 1] + ".."  # Include the punctuation
+            else:
+                # If no good breaking point, break at last space before 297 chars
+                last_space = plot[:297].rfind(' ')
+                if last_space > 100:
+                    plot = plot[:last_space] + "..."
+                else:
+                    plot = plot[:297] + "..."
+        
+        embed.add_field(
+            name="📖 Plot",
+            value=plot,
+            inline=False
+        )
+
+    # ADD MEDIA INFO BAR:
+    if scraped_info:
+        rating_info = []
+        if scraped_info.get('rating'):
+            rating_info.append(f"⭐ {scraped_info['rating']}")
+        if scraped_info.get('genre'):
+            rating_info.append(f"🎭 {scraped_info['genre']}")
+        
+        if rating_info:
+            embed.add_field(
+                name="🎭 Media Info",
+                value=" • ".join(rating_info),
+                inline=False
+            )
+
     # Status fields
-
     embed.add_field(
-
         name="📊 Status",
-
         value=state_icon,
-
         inline=True
-
     )
 
     embed.add_field(
-
         name="🔊 Volume",
-
         value=f"{volume}%",
-
         inline=True
-
     )
 
     if total_seconds > 0:
-
         embed.add_field(
-
             name="⏱️ Duration",
-
             value=media_info['duration'],
-
             inline=True
-
         )
 
-    # CHANGE 1: Progress information with endtime at same height as starttime
-
+    # Progress information
     if total_seconds > 0:
-
         # Modified: Show both start and end time in same field
-
         embed.add_field(
-
             name="🕐 Progress",
-
             value=f"{current_time} / {total_time}",
-
             inline=True
-
         )
 
         embed.add_field(
-
             name="⏳ Remaining",
-
             value=remaining_time,
-
             inline=True
-
         )
 
         # Progress percentage
-
         progress_percent = (position * 100) if position > 0 else 0
-
         embed.add_field(
-
             name="📈 Complete",
-
             value=f"{progress_percent:.1f}%",
-
             inline=True
-
         )
 
-        # CHANGE 2: Visual progress bar with times at start and end - Spotify style
-
+        # Visual progress bar with times at start and end - Spotify style
         embed.add_field(
-
             name="🎵 Progress",
-
             value=f"{current_time} {progress_bar} {total_time}",
-
             inline=False
-
         )
 
-    # CHANGE 3: Playlist information - show names and sequence instead of just count
-
+    # Playlist information
     if has_playlist:
-
         current_idx = state.current_playlist_index
-
         total_items = len(playlist_info)
 
-
-
         # Get list of playlist items with their names
-
         playlist_text = f"**{current_idx + 1}/{total_items}** items in playlist\n\n"
 
-
-
         # Show current and next few items with their sequence numbers
-
         items_to_show = []
-
         start_idx = max(0, current_idx - 1)  # Show one before current if available
-
         end_idx = min(total_items, current_idx + 4)  # Show current + next 3
 
-
-
         for i in range(start_idx, end_idx):
-
             item_name = playlist_info[i]['name']
-
             # Clean up item name same way as current media
-
             if item_name != "Unknown":
-
                 item_name = os.path.basename(item_name)
-
                 name_without_ext = os.path.splitext(item_name)[0]
-
                 if name_without_ext.strip():
-
                     item_name = name_without_ext
-
                 item_name = item_name.replace('_', ' ').replace('-', ' ').strip()
 
-
-
             if len(item_name) > 35:
-
                 item_name = item_name[:32] + "..."
 
-
-
             if i == current_idx:
-
                 items_to_show.append(f"**▶ {i + 1}. {item_name}** (Now Playing)")
-
             else:
-
                 items_to_show.append(f"{i + 1}. {item_name}")
-
-
 
         playlist_text += "\n".join(items_to_show)
 
-
-
         embed.add_field(
-
             name="📋 Playlist",
-
             value=playlist_text,
-
             inline=False
-
         )
 
     # Connection status
-
     connection_status = "🟢 Connected" if vlc.is_connected else f"🔴 Connection Issues ({vlc.connection_attempts} attempts)"
-
     embed.add_field(
-
         name="🔗 VLC Connection",
-
         value=connection_status,
-
         inline=True
-
     )
 
-    # CHANGE 4: Modified footer to show persistent pause info
+    # ADD THUMBNAIL:
+    if Config.SHOW_THUMBNAIL and scraped_info and scraped_info.get('image'):
+        embed.set_thumbnail(url=scraped_info['image'])
 
+    # Modified footer to show persistent pause info
     footer_text = "Use the buttons below to control playback • Updates every 3 seconds"
 
-
-
     # Show who paused until media is played back
-
     if state.last_pauser_id is not None and state_raw == 'paused':
-
         pauser_name = state.last_pauser_name or "Unknown"
-
         if state.last_pause_time:
-
             time_ago = datetime.now() - state.last_pause_time
-
             if time_ago.total_seconds() < 60:
-
                 time_str = f"{int(time_ago.total_seconds())}s ago"
-
             elif time_ago.total_seconds() < 3600:
-
                 time_str = f"{int(time_ago.total_seconds()/60)}m ago"
-
             else:
-
                 time_str = f"{int(time_ago.total_seconds()/3600)}h ago"
-
             footer_text = f"Paused by {pauser_name} ({time_str}) • Use buttons to control playback"
-
         else:
-
             footer_text = f"Paused by {pauser_name} • Use buttons to control playback"
-
     elif last_action_by and action_type:
-
         footer_text = f"Last action: {action_type} by {last_action_by} • Updates every 3 seconds"
-
-
 
     embed.set_footer(text=footer_text)
 
     # Store current media info for bot status
-
     state.current_media = {
-
         'title': display_title,
-
         'state': state_raw,
-
         'position': position,
-
         'length': length,
-
         'has_playlist': has_playlist,
-
         'playlist_index': state.current_playlist_index,
-
         'playlist_total': len(playlist_info)
-
     }
 
     return embed
@@ -1730,29 +1945,19 @@ async def on_command_error(ctx, error):
         await ctx.send("❌ An error occurred while executing the command.")
 
 async def main():
-
     """Main async function to run the bot"""
-
     try:
-
         await bot.start(Config.DISCORD_BOT_TOKEN)
-
     except KeyboardInterrupt:
-
         logger.info("Bot stopped by user")
-
     except Exception as e:
-
         logger.error(f"Bot crashed: {e}")
-
     finally:
-
         await vlc.close()
-
+        await media_scraper.close()  # ADD THIS LINE
         if bot.is_ready():
-
             await bot.close()
 
+# Run the bot
 if __name__ == "__main__":
-
-    asyncio.run(main())
+    asyncio.run(main())            
