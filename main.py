@@ -1653,7 +1653,7 @@ def is_mobile_user(user_agent: str = None) -> bool:
         return any(indicator in user_agent.lower() for indicator in mobile_indicators)
     return False
 
-async def create_vlc_embed(status_data: Optional[Dict] = None, last_action_by: str = None, action_type: str = None, mobile_optimized: bool = False) -> discord.Embed:
+async def create_vlc_embed(status_data: Optional[Dict] = None, last_action_by: str = None, action_type: str = None) -> discord.Embed:
     """Create comprehensive VLC status embed"""
 
     # Handle disconnected state
@@ -1734,19 +1734,14 @@ async def create_vlc_embed(status_data: Optional[Dict] = None, last_action_by: s
         if media_info['album']:
             description += f"\n*from {media_info['album']}*"
 
-    # Create embed with mobile optimization
-    title = "🎬 VLC Player" if mobile_optimized else "🎬 VLC Media Player"
-    
+    # Create embed
     embed = discord.Embed(
-        title=title,
+        title="🎬 VLC Media Player",
         color=color,
         timestamp=datetime.now()
     )
 
     # Set the main description (title + artist info)
-    if mobile_optimized and len(description) > 100:
-        # Truncate description for mobile
-        description = description[:97] + "..."
     embed.description = description
 
     # ADD PLOT SUMMARY with smart truncation
@@ -1793,80 +1788,55 @@ async def create_vlc_embed(status_data: Optional[Dict] = None, last_action_by: s
                 inline=False
             )
 
-    # Status fields - mobile optimized
-    if mobile_optimized:
-        # Combine status and volume for mobile
+    # Status fields
+    embed.add_field(
+        name="📊 Status",
+        value=state_icon,
+        inline=True
+    )
+
+    embed.add_field(
+        name="🔊 Volume",
+        value=f"{volume}%",
+        inline=True
+    )
+
+    if total_seconds > 0:
         embed.add_field(
-            name="📊 Status & Volume",
-            value=f"{state_icon} • {volume}%",
+            name="⏱️ Duration",
+            value=media_info['duration'],
+            inline=True
+        )
+
+    # Progress information
+    if total_seconds > 0:
+        # Modified: Show both start and end time in same field
+        embed.add_field(
+            name="🕐 Progress",
+            value=f"{current_time} / {total_time}",
+            inline=True
+        )
+
+        embed.add_field(
+            name="⏳ Remaining",
+            value=remaining_time,
+            inline=True
+        )
+
+        # Progress percentage
+        progress_percent = (position * 100) if position > 0 else 0
+        embed.add_field(
+            name="📈 Complete",
+            value=f"{progress_percent:.1f}%",
+            inline=True
+        )
+
+        # Visual progress bar with times at start and end - Spotify style
+        embed.add_field(
+            name="🎵 Progress",
+            value=f"{current_time} {progress_bar} {total_time}",
             inline=False
         )
-        
-        if total_seconds > 0:
-            embed.add_field(
-                name="⏱️ Duration",
-                value=media_info['duration'],
-                inline=False
-            )
-    else:
-        # Regular desktop layout
-        embed.add_field(
-            name="📊 Status",
-            value=state_icon,
-            inline=True
-        )
-
-        embed.add_field(
-            name="🔊 Volume",
-            value=f"{volume}%",
-            inline=True
-        )
-
-        if total_seconds > 0:
-            embed.add_field(
-                name="⏱️ Duration",
-                value=media_info['duration'],
-                inline=True
-            )
-
-    # Progress information - mobile optimized
-    if total_seconds > 0:
-        if mobile_optimized:
-            # Combined progress info for mobile
-            progress_percent = (position * 100) if position > 0 else 0
-            embed.add_field(
-                name="🎵 Progress",
-                value=f"{current_time} / {total_time} ({progress_percent:.1f}%)\n{progress_bar}",
-                inline=False
-            )
-        else:
-            # Regular desktop layout
-            embed.add_field(
-                name="🕐 Progress",
-                value=f"{current_time} / {total_time}",
-                inline=True
-            )
-
-            embed.add_field(
-                name="⏳ Remaining",
-                value=remaining_time,
-                inline=True
-            )
-
-            # Progress percentage
-            progress_percent = (position * 100) if position > 0 else 0
-            embed.add_field(
-                name="📈 Complete",
-                value=f"{progress_percent:.1f}%",
-                inline=True
-            )
-
-            # Visual progress bar with times at start and end - Spotify style
-            embed.add_field(
-                name="🎵 Progress",
-                value=f"{current_time} {progress_bar} {total_time}",
-                inline=False
-            )
 
     # Playlist information
     if has_playlist:
@@ -1957,9 +1927,8 @@ async def create_vlc_embed(status_data: Optional[Dict] = None, last_action_by: s
 class VLCControlView(discord.ui.View):
     """Enhanced control view with cooldowns, role restrictions, and mobile optimization"""
     
-    def __init__(self, mobile_optimized: bool = False):
+    def __init__(self):
         super().__init__(timeout=None)
-        self.mobile_optimized = mobile_optimized
 
     def has_required_role(self, user: discord.Member) -> bool:
         """Check if user has the required role"""
@@ -2003,9 +1972,9 @@ class VLCControlView(discord.ui.View):
         
         return True
 
-    # Row 0: Playlist navigation and main controls (mobile optimized)
+    # Row 0: Playlist navigation and main controls
     @discord.ui.button(
-        label="⏮️" if not self.mobile_optimized else "⏮️ Prev", 
+        label="⏮️", 
         style=discord.ButtonStyle.secondary, 
         custom_id="previous_track", 
         row=0
@@ -2024,7 +1993,7 @@ class VLCControlView(discord.ui.View):
             await interaction.response.send_message("❌ Failed to go to previous track. VLC might be disconnected.", ephemeral=True)
 
     @discord.ui.button(
-        label="⏪ -10s" if not self.mobile_optimized else "⏪", 
+        label="⏪ -10s", 
         style=discord.ButtonStyle.secondary, 
         custom_id="seek_back", 
         row=0
@@ -2043,7 +2012,7 @@ class VLCControlView(discord.ui.View):
             await interaction.response.send_message("❌ Failed to seek backward. VLC might be disconnected.", ephemeral=True)
 
     @discord.ui.button(
-        label="⏸️" if not self.mobile_optimized else "⏸️ Pause", 
+        label="⏸️", 
         style=discord.ButtonStyle.danger, 
         custom_id="pause_btn", 
         row=0
@@ -2063,7 +2032,7 @@ class VLCControlView(discord.ui.View):
             await interaction.response.send_message("❌ Failed to pause. VLC might be disconnected.", ephemeral=True)
 
     @discord.ui.button(
-        label="▶️" if not self.mobile_optimized else "▶️ Play", 
+        label="▶️", 
         style=discord.ButtonStyle.success, 
         custom_id="play_btn", 
         row=0
@@ -2092,7 +2061,7 @@ class VLCControlView(discord.ui.View):
             await interaction.response.send_message("❌ Failed to resume. VLC might be disconnected.", ephemeral=True)
 
     @discord.ui.button(
-        label="+10s ⏩" if not self.mobile_optimized else "⏩", 
+        label="+10s ⏩", 
         style=discord.ButtonStyle.secondary, 
         custom_id="seek_forward", 
         row=0
@@ -2538,11 +2507,8 @@ async def update_status_embed():
 
         # Only update embed if status changed or no message exists
         if not state.status_message or status_has_changed(status_data, state.last_status):
-            # Detect mobile optimization (simplified)
-            mobile_optimized = Config.ENABLE_MOBILE_OPTIMIZATION and Config.COMPACT_DISPLAY
-            
-            embed = await create_vlc_embed(status_data, mobile_optimized=mobile_optimized)
-            view = VLCControlView(mobile_optimized=mobile_optimized)
+            embed = await create_vlc_embed(status_data)
+            view = VLCControlView()
 
             if state.status_message:
 
