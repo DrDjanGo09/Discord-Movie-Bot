@@ -1129,6 +1129,10 @@ class BotState:
         self.session_start_times: Dict[int, datetime] = {}  # user_id -> session start time
         self.daily_stats: Dict[str, Dict] = {}  # date -> {"total_watch_time": float, "unique_users": int}
         
+        # Debug counters
+        self.periodic_tracking_runs = 0
+        self.total_watch_time_tracked = 0.0
+        
         # Media recommendations
         self.recommendation_cache: Dict[str, List[Dict]] = {}  # user_id -> [recommendations]
         self.last_recommendation_update: Dict[str, datetime] = {}  # user_id -> last update time
@@ -2517,6 +2521,7 @@ async def detect_voice_streaming_enhanced(member=None, before=None, after=None):
         return
     
     try:
+        logger.debug("📊 Running streaming detection...")
         # If specific voice channel is configured, use it
         if Config.VOICE_CHANNEL_ID:
             voice_channel = bot.get_channel(Config.VOICE_CHANNEL_ID)
@@ -2579,6 +2584,7 @@ async def detect_voice_streaming_enhanced(member=None, before=None, after=None):
                     state.streaming_media = f"{streamer_name}'s Stream"
                     
                     logger.info(f"🎥 Streaming started by {streamer_name} with {len(current_members)} viewers")
+                    logger.info(f"📊 Initialized {len(state.viewer_sessions)} viewer sessions")
                     
                     # Initialize viewer sessions with proper names
                     for viewer_id in state.current_viewers:
@@ -2591,9 +2597,11 @@ async def detect_voice_streaming_enhanced(member=None, before=None, after=None):
                                 "start_time": datetime.now(),
                                 "media": state.streaming_media,
                                 "duration": 0.0,
-                                "channel_id": channel_id
+                                "channel_id": channel_id,
+                                "last_tracked_time": datetime.now()
                             }
-                            logger.info(f"👀 Started tracking viewer: {viewer_name}")
+                            logger.info(f"👀 Started tracking viewer: {viewer_name} (ID: {viewer_id})")
+                            logger.info(f"📊 Created viewer session for {viewer_name}: {state.viewer_sessions[viewer_id]}")
                 
                 else:
                     # Same streamer, update viewers
@@ -2611,9 +2619,11 @@ async def detect_voice_streaming_enhanced(member=None, before=None, after=None):
                                 "start_time": datetime.now(),
                                 "media": state.streaming_media,
                                 "duration": 0.0,
-                                "channel_id": channel_id
+                                "channel_id": channel_id,
+                                "last_tracked_time": datetime.now()
                             }
-                            logger.info(f"👀 New viewer joined: {viewer_name}")
+                            logger.info(f"👀 New viewer joined: {viewer_name} (ID: {viewer_id})")
+                            logger.info(f"📊 Created viewer session for {viewer_name}: {state.viewer_sessions[viewer_id]}")
                     
                     # Remove viewers who left and track their watch time
                     for viewer_id in left_viewers:
@@ -2659,7 +2669,7 @@ async def get_current_media_title() -> Optional[str]:
 def track_viewer_watch_time(user_id: int, media_title: str, duration: float):
     """Track watch time for a viewer with proper accumulation"""
     try:
-        logger.info(f"📊 Tracking watch time for user {user_id}: {duration:.1f}s for '{media_title}'")
+        logger.debug(f"📊 Tracking watch time for user {user_id}: {duration:.1f}s for '{media_title}'")
         
         # Initialize user analytics if not exists
         if user_id not in state.user_watch_time:
@@ -2679,7 +2689,7 @@ def track_viewer_watch_time(user_id: int, media_title: str, duration: float):
             state.user_watch_time[user_id] += duration
             new_total = state.user_watch_time[user_id]
             
-            logger.info(f"📊 Watch time updated: {old_total:.1f}s -> {new_total:.1f}s (+{duration:.1f}s) for user {user_id}")
+            logger.debug(f"📊 Watch time updated: {old_total:.1f}s -> {new_total:.1f}s (+{duration:.1f}s) for user {user_id}")
             
             # Add to media history with actual duration
             state.user_media_history[user_id].append({
@@ -2702,12 +2712,65 @@ def track_viewer_watch_time(user_id: int, media_title: str, duration: float):
             state.daily_stats[today]["unique_users"].add(user_id)
             
             user_name = state.user_display_names.get(user_id, f"User {user_id}")
-            logger.info(f"📊 Successfully tracked {duration:.1f}s for {user_name}. Total: {new_total:.1f}s")
+            logger.debug(f"📊 Successfully tracked {duration:.1f}s for {user_name}. Total: {new_total:.1f}s")
         else:
             logger.warning(f"📊 Skipped zero/negative duration: {duration}s for user {user_id}")
         
     except Exception as e:
         logger.error(f"❌ Error tracking viewer watch time: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+
+def track_active_viewers_watch_time():
+    """Periodically track watch time for currently active viewers"""
+    try:
+        state.periodic_tracking_runs += 1
+        
+        if not state.current_streamer or not state.viewer_sessions:
+            logger.debug("📊 No active streamer or viewer sessions to track")
+            return
+        
+        current_time = datetime.now()
+        total_tracked = 0
+        tracked_viewers = 0
+        
+        logger.debug(f"📊 Run #{state.periodic_tracking_runs}: Checking {len(state.viewer_sessions)} active viewer sessions")
+        
+        for viewer_id, session in state.viewer_sessions.items():
+            if session["start_time"]:
+                # Calculate time since last update
+                time_since_start = (current_time - session["start_time"]).total_seconds()
+                
+                # Only track if we have a meaningful duration (at least 5 seconds)
+                if time_since_start >= 5:
+                    # Calculate incremental watch time since last tracking
+                    last_tracked = session.get("last_tracked_time", session["start_time"])
+                    incremental_duration = (current_time - last_tracked).total_seconds()
+                    
+                    if incremental_duration > 0:
+                        # Track the incremental watch time
+                        track_viewer_watch_time(viewer_id, session["media"], incremental_duration)
+                        
+                        # Update session tracking
+                        session["last_tracked_time"] = current_time
+                        session["duration"] += incremental_duration
+                        total_tracked += incremental_duration
+                        tracked_viewers += 1
+                        state.total_watch_time_tracked += incremental_duration
+                        
+                        logger.debug(f"📊 Tracked {incremental_duration:.1f}s for viewer {viewer_id} (total: {session['duration']:.1f}s)")
+                else:
+                    logger.debug(f"📊 Skipping viewer {viewer_id} - not enough time elapsed ({time_since_start:.1f}s < 5s)")
+            else:
+                logger.warning(f"📊 Viewer {viewer_id} has no start_time in session")
+        
+        if total_tracked > 0:
+            logger.info(f"📊 Run #{state.periodic_tracking_runs}: Tracked {total_tracked:.1f}s total watch time for {tracked_viewers}/{len(state.viewer_sessions)} active viewers")
+        else:
+            logger.debug(f"📊 Run #{state.periodic_tracking_runs}: No watch time to track for {len(state.viewer_sessions)} active viewers")
+            
+    except Exception as e:
+        logger.error(f"❌ Error tracking active viewers watch time: {e}")
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
 
@@ -2873,6 +2936,7 @@ async def on_ready():
     if Config.ENABLE_STREAM_DETECTION:
         stream_detection_task.start()
         logger.info("🎥 Voice channel streaming detection enabled")
+        logger.info(f"📊 Watch time tracking interval: {Config.STREAM_DETECTION_INTERVAL} seconds")
 
     # Debug: List all registered commands
     commands = bot.tree.get_commands()
@@ -2926,6 +2990,10 @@ async def stream_detection_task():
     """Periodically detect voice channel streaming and track viewers"""
     if Config.ENABLE_STREAM_DETECTION:
         await detect_voice_streaming_enhanced()
+        # Track watch time for active viewers
+        if state.current_streamer and state.viewer_sessions:
+            logger.debug(f"📊 Running periodic watch time tracking for {len(state.viewer_sessions)} viewers")
+        track_active_viewers_watch_time()
 
 @tasks.loop(seconds=Config.UPDATE_INTERVAL)
 async def update_status_embed():
@@ -4336,7 +4404,128 @@ async def refresh_stream_command(interaction: discord.Interaction):
     except Exception as e:
         logger.error(f"Refresh stream error: {e}")
         await interaction.response.send_message(f"❌ Refresh failed: {e}", ephemeral=True)
+
+@bot.tree.command(name="track_watch_time", description="Manually trigger watch time tracking (admin only)")
+async def track_watch_time_command(interaction: discord.Interaction):
+    """Manually trigger watch time tracking for active viewers"""
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ Only admins can trigger watch time tracking.", ephemeral=True)
+        return
+    
+    try:
+        # Track watch time for active viewers
+        track_active_viewers_watch_time()
         
+        # Get current stats
+        total_viewers = len(state.viewer_sessions)
+        total_watch_time = sum(state.user_watch_time.values())
+        
+        await interaction.response.send_message(
+            f"✅ Watch time tracking triggered. Active viewers: **{total_viewers}**, Total watch time: **{total_watch_time:.1f}s**",
+            ephemeral=True
+        )
+        
+    except Exception as e:
+        logger.error(f"Track watch time error: {e}")
+        await interaction.response.send_message(f"❌ Failed to track watch time: {e}", ephemeral=True)
+
+@bot.tree.command(name="viewer_sessions", description="Show current viewer sessions (admin only)")
+async def viewer_sessions_command(interaction: discord.Interaction):
+    """Show current viewer sessions for debugging"""
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ Only admins can view viewer sessions.", ephemeral=True)
+        return
+    
+    try:
+        if not state.viewer_sessions:
+            await interaction.response.send_message("📭 No active viewer sessions.", ephemeral=True)
+            return
+        
+        embed = discord.Embed(
+            title="👀 Current Viewer Sessions",
+            color=discord.Color.blue(),
+            timestamp=datetime.now()
+        )
+        
+        current_time = datetime.now()
+        for viewer_id, session in state.viewer_sessions.items():
+            viewer_name = state.user_display_names.get(viewer_id, f"User {viewer_id}")
+            duration = (current_time - session["start_time"]).total_seconds()
+            last_tracked = session.get("last_tracked_time", session["start_time"])
+            time_since_tracked = (current_time - last_tracked).total_seconds()
+            
+            embed.add_field(
+                name=f"👤 {viewer_name}",
+                value=f"**Duration:** {duration:.1f}s\n**Last Tracked:** {time_since_tracked:.1f}s ago\n**Media:** {session['media']}",
+                inline=True
+            )
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        
+    except Exception as e:
+        logger.error(f"Viewer sessions error: {e}")
+        await interaction.response.send_message(f"❌ Failed to get viewer sessions: {e}", ephemeral=True)
+        
+@bot.tree.command(name="watch_debug", description="Debug watch time tracking (admin only)")
+async def watch_debug_command(interaction: discord.Interaction):
+    """Debug command to show watch time tracking status"""
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ Only admins can use debug commands.", ephemeral=True)
+        return
+    
+    try:
+        user_id = interaction.user.id
+        
+        # Create debug message
+        debug_lines = [
+            "🐛 Watch Time Debug - Detailed",
+            "🔍 State Variables",
+            f"user_watch_time dict: {len(state.user_watch_time)} users",
+            f"Your watch time: {'NOT FOUND' if user_id not in state.user_watch_time else f'{state.user_watch_time[user_id]:.1f}s'}",
+            f"user_media_history: {len(state.user_media_history.get(user_id, []))} items",
+            f"viewer_sessions: {len(state.viewer_sessions)} sessions",
+            f"In viewer_sessions: {user_id in state.viewer_sessions}",
+            "",
+            "🎥 Current Stream",
+            f"Streamer: {state.current_streamer or 'None'}",
+            f"Viewers: {len(state.current_viewers)}",
+            f"You are viewer: {user_id in state.current_viewers}",
+        ]
+        
+        # Add viewer session info if user is in it
+        if user_id in state.viewer_sessions:
+            session = state.viewer_sessions[user_id]
+            current_duration = (datetime.now() - session["start_time"]).total_seconds()
+            debug_lines.extend([
+                "",
+                "👀 Your Viewer Session",
+                f"Start time: {session['start_time']}",
+                f"Current duration: {current_duration:.1f}s",
+                f"Media: {session['media']}",
+            ])
+        
+        # Add user actions info
+        user_actions = state.user_actions.get(user_id, {}).get("actions", [])
+        debug_lines.extend([
+            "",
+            "📝 User Actions",
+            f"{'❌ No user actions found' if not user_actions else f'✅ {len(user_actions)} actions found'}",
+            "",
+            "🔧 Debug Info",
+            f"Periodic tracking runs: {state.periodic_tracking_runs}",
+            f"Total watch time tracked: {state.total_watch_time_tracked:.1f}s",
+            f"Stream detection interval: {Config.STREAM_DETECTION_INTERVAL}s"
+        ])
+        
+        debug_message = "\n".join(debug_lines)
+        
+        # Send as ephemeral message
+        await interaction.response.send_message(f"```\n{debug_message}\n```", ephemeral=True)
+        
+    except Exception as e:
+        logger.error(f"Watch debug error: {e}")
+        await interaction.response.send_message(f"❌ Debug error: {e}", ephemeral=True)
+
 @bot.tree.command(name="reset_stats", description="Reset viewing statistics (admin only)")
 async def reset_stats_command(interaction: discord.Interaction):
     """Reset all viewing statistics"""
