@@ -103,6 +103,12 @@ class Config:
     VOICE_CHANNEL_ID = int(os.getenv('VOICE_CHANNEL_ID')) if os.getenv('VOICE_CHANNEL_ID') else None
     AUTO_PAUSE_EMPTY_VOICE = os.getenv('AUTO_PAUSE_EMPTY_VOICE', 'true').lower() == 'true'
     VOICE_SYNC_CHECK_INTERVAL = int(os.getenv('VOICE_SYNC_CHECK_INTERVAL', '10'))
+    
+    # Voice Channel Streaming Detection
+    ENABLE_STREAM_DETECTION = os.getenv('ENABLE_STREAM_DETECTION', 'true').lower() == 'true'
+    STREAM_DETECTION_INTERVAL = int(os.getenv('STREAM_DETECTION_INTERVAL', '5'))
+    MIN_VIEWERS_FOR_TRACKING = int(os.getenv('MIN_VIEWERS_FOR_TRACKING', '1'))
+    AUTO_TRACK_VIEWERS = os.getenv('AUTO_TRACK_VIEWERS', 'true').lower() == 'true'
 
     # Security
 
@@ -1094,6 +1100,16 @@ class BotState:
         self.last_voice_check: datetime = datetime.now()
         self.voice_sync_enabled: bool = False
         
+        # Voice channel streaming detection
+        self.current_streamer: Optional[int] = None  # user_id of current streamer
+        self.current_viewers: Set[int] = set()  # user_ids of current viewers
+        self.stream_start_time: Optional[datetime] = None
+        self.last_stream_check: datetime = datetime.now()
+        self.streaming_media: Optional[str] = None  # current streaming media title
+        self.viewer_sessions: Dict[int, Dict] = {}  # user_id -> {start_time, media, duration}
+        self.stream_history: List[Dict] = []  # List of streaming sessions
+        self.user_display_names: Dict[int, str] = {}  # user_id -> display_name
+        
         # Smart controls
         self.volume_history: List[int] = []
         self.last_volume_adjustment: datetime = datetime.now()
@@ -1198,23 +1214,34 @@ def track_watch_time(user_id: int, media_title: str, duration: float, genres: Li
         logger.error(f"Error tracking watch time: {e}")
 
 def get_user_analytics(user_id: int) -> Dict:
-    """Get comprehensive analytics for a user"""
+    """Get comprehensive analytics for a user with proper watch time calculation"""
     try:
+        # Initialize with default values
         analytics = {
-            "total_watch_time": state.user_watch_time.get(user_id, 0.0),
+            "total_watch_time": 0.0,
             "total_actions": state.user_actions.get(user_id, {}).get("total_actions", 0),
             "favorite_genres": [],
             "recent_media": [],
-            "watch_time_formatted": "",
+            "watch_time_formatted": "0h 0m",
             "top_genre": "",
-            "media_count": 0
+            "media_count": 0,
+            "streaming_sessions": 0,
+            "total_stream_watch_time": 0.0,
+            "is_currently_watching": user_id in state.current_viewers
         }
         
-        # Format watch time
-        total_seconds = analytics["total_watch_time"]
-        hours = int(total_seconds // 3600)
-        minutes = int((total_seconds % 3600) // 60)
-        analytics["watch_time_formatted"] = f"{hours}h {minutes}m"
+        # Get total watch time
+        total_seconds = state.user_watch_time.get(user_id, 0.0)
+        analytics["total_watch_time"] = total_seconds
+        
+        # Format watch time properly
+        if total_seconds > 0:
+            hours = int(total_seconds // 3600)
+            minutes = int((total_seconds % 3600) // 60)
+            seconds = int(total_seconds % 60)
+            analytics["watch_time_formatted"] = f"{hours}h {minutes}m {seconds}s"
+        else:
+            analytics["watch_time_formatted"] = "0h 0m 0s"
         
         # Get favorite genres
         if user_id in state.user_genre_preferences:
@@ -1224,24 +1251,47 @@ def get_user_analytics(user_id: int) -> Dict:
             if sorted_genres:
                 analytics["top_genre"] = sorted_genres[0][0]
         
-        # Get recent media
-        if user_id in state.user_media_history:
+        # Get recent media with proper duration formatting
+        if user_id in state.user_media_history and state.user_media_history[user_id]:
             recent_media = state.user_media_history[user_id][-10:]  # Last 10 items
             analytics["recent_media"] = [
                 {
                     "title": item["media"],
-                    "duration": seconds_to_time(item["duration"]),
-                    "timestamp": item["timestamp"].strftime("%Y-%m-%d %H:%M")
+                    "duration": seconds_to_time(item["duration"]),  # Format individual session duration
+                    "timestamp": item["timestamp"].strftime("%Y-%m-%d %H:%M"),
+                    "raw_duration": item["duration"]  # Keep raw for debugging
                 }
                 for item in recent_media
             ]
             analytics["media_count"] = len(state.user_media_history[user_id])
         
+        # Calculate streaming statistics
+        if user_id in state.user_media_history:
+            stream_sessions = [item for item in state.user_media_history[user_id] if item.get("type") == "stream_viewing"]
+            analytics["streaming_sessions"] = len(stream_sessions)
+            analytics["total_stream_watch_time"] = sum(item["duration"] for item in stream_sessions)
+        
+        # Debug logging
+        logger.info(f"📊 Analytics for user {user_id}: {total_seconds:.1f}s total, {analytics['media_count']} media items")
+        
         return analytics
         
     except Exception as e:
-        logger.error(f"Error getting user analytics: {e}")
-        return {}
+        logger.error(f"❌ Error getting user analytics: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return {
+            "total_watch_time": 0.0,
+            "total_actions": 0,
+            "favorite_genres": [],
+            "recent_media": [],
+            "watch_time_formatted": "0h 0m 0s",
+            "top_genre": "",
+            "media_count": 0,
+            "streaming_sessions": 0,
+            "total_stream_watch_time": 0.0,
+            "is_currently_watching": False
+        }
 
 def get_server_analytics() -> Dict:
     """Get server-wide analytics"""
@@ -1294,10 +1344,20 @@ def generate_recommendations(user_id: int, current_media: str = None) -> List[Di
         user_genres = state.user_genre_preferences.get(user_id, {})
         user_media = state.user_media_history.get(user_id, [])
         
-        if not user_genres and not user_media:
+        # Check if user is currently watching a stream
+        is_currently_watching = user_id in state.current_viewers
+        current_stream_media = state.streaming_media if is_currently_watching else None
+        
+        if not user_genres and not user_media and not is_currently_watching:
             return []
         
         recommendations = []
+        
+        # Add streaming-based recommendations if user is currently watching
+        if is_currently_watching and current_stream_media:
+            # Get recommendations based on what's currently being streamed
+            stream_recommendations = get_stream_based_recommendations(current_stream_media)
+            recommendations.extend(stream_recommendations)
         
         # Get popular genres from user's history
         top_genres = sorted(user_genres.items(), key=lambda x: x[1], reverse=True)[:3]
@@ -1359,6 +1419,52 @@ def get_genre_recommendations(genre: str) -> List[Dict]:
     }
     
     return genre_samples.get(genre, [])
+
+def get_stream_based_recommendations(current_media: str) -> List[Dict]:
+    """Get recommendations based on currently streaming media"""
+    try:
+        # This is a simplified implementation
+        # In a real system, you'd analyze the current media and find similar content
+        
+        # Extract potential genre/keywords from media title
+        media_lower = current_media.lower()
+        
+        # Simple keyword-based recommendations
+        if any(keyword in media_lower for keyword in ['action', 'fight', 'battle', 'war']):
+            return [
+                {"title": "Mad Max: Fury Road", "year": "2015", "rating": "8.1/10", "reason": "Similar high-octane action"},
+                {"title": "John Wick", "year": "2014", "rating": "7.4/10", "reason": "Intense action sequences"},
+                {"title": "The Raid", "year": "2011", "rating": "7.6/10", "reason": "Martial arts action"}
+            ]
+        elif any(keyword in media_lower for keyword in ['comedy', 'funny', 'laugh']):
+            return [
+                {"title": "The Grand Budapest Hotel", "year": "2014", "rating": "8.1/10", "reason": "Witty comedy with style"},
+                {"title": "Deadpool", "year": "2016", "rating": "8.0/10", "reason": "Meta comedy superhero"},
+                {"title": "The Nice Guys", "year": "2016", "rating": "7.4/10", "reason": "Buddy comedy mystery"}
+            ]
+        elif any(keyword in media_lower for keyword in ['horror', 'scary', 'fright']):
+            return [
+                {"title": "Hereditary", "year": "2018", "rating": "7.3/10", "reason": "Psychological horror"},
+                {"title": "The Babadook", "year": "2014", "rating": "6.8/10", "reason": "Atmospheric horror"},
+                {"title": "Get Out", "year": "2017", "rating": "7.7/10", "reason": "Social horror thriller"}
+            ]
+        elif any(keyword in media_lower for keyword in ['drama', 'emotional', 'serious']):
+            return [
+                {"title": "Moonlight", "year": "2016", "rating": "7.4/10", "reason": "Powerful character drama"},
+                {"title": "Manchester by the Sea", "year": "2016", "rating": "7.8/10", "reason": "Emotional family drama"},
+                {"title": "The Father", "year": "2020", "rating": "8.2/10", "reason": "Intimate family drama"}
+            ]
+        else:
+            # General recommendations based on popular streaming content
+            return [
+                {"title": "Stranger Things", "year": "2016", "rating": "8.7/10", "reason": "Popular streaming series"},
+                {"title": "The Queen's Gambit", "year": "2020", "rating": "8.5/10", "reason": "Critically acclaimed miniseries"},
+                {"title": "Squid Game", "year": "2021", "rating": "8.1/10", "reason": "Global streaming phenomenon"}
+            ]
+            
+    except Exception as e:
+        logger.error(f"Error getting stream-based recommendations: {e}")
+        return []
 
 def get_playlist_recommendations(current_playlist: List[Dict]) -> List[Dict]:
     """Get recommendations based on current playlist"""
@@ -2130,6 +2236,30 @@ class VLCControlView(discord.ui.View):
                 value=f"{len(state.playlist)} items\nCurrent: {state.current_playlist_index + 1}/{len(state.playlist)}",
                 inline=True
             )
+        # Streaming status
+        if Config.ENABLE_STREAM_DETECTION and state.current_streamer:
+            streamer = bot.get_user(state.current_streamer)
+            streamer_name = streamer.display_name if streamer else f"User {state.current_streamer}"
+            viewer_count = len(state.current_viewers)
+            stream_duration = ""
+            if state.stream_start_time:
+                duration = datetime.now() - state.stream_start_time
+                hours, remainder = divmod(int(duration.total_seconds()), 3600)
+                minutes, seconds = divmod(remainder, 60)
+                stream_duration = f" ({hours:02d}:{minutes:02d}:{seconds:02d})"
+            
+            embed.add_field(
+                name="🎥 Streaming Status",
+                value=f"**Streamer:** {streamer_name}\n**Viewers:** {viewer_count}\n**Media:** {state.streaming_media or 'Unknown'}{stream_duration}",
+                inline=False
+            )
+        elif Config.ENABLE_STREAM_DETECTION:
+            embed.add_field(
+                name="🎥 Streaming Status",
+                value="No active stream",
+                inline=False
+            )
+        
         # Top users
         if state.user_actions:
             top_users = sorted(
@@ -2381,24 +2511,317 @@ async def check_voice_channel_sync():
     except Exception as e:
         logger.error(f"Voice channel sync error: {e}")
 
+async def detect_voice_streaming_enhanced(member=None, before=None, after=None):
+    """Enhanced streaming detection with proper user name tracking"""
+    if not Config.ENABLE_STREAM_DETECTION:
+        return
+    
+    try:
+        # If specific voice channel is configured, use it
+        if Config.VOICE_CHANNEL_ID:
+            voice_channel = bot.get_channel(Config.VOICE_CHANNEL_ID)
+            if not voice_channel:
+                return
+            channels_to_check = [voice_channel]
+        else:
+            # Check all voice channels in all guilds
+            channels_to_check = []
+            for guild in bot.guilds:
+                for channel in guild.voice_channels:
+                    if channel.members:
+                        channels_to_check.append(channel)
+        
+        active_stream_found = False
+        
+        for voice_channel in channels_to_check:
+            # Get current voice channel members (excluding bots)
+            current_members = set(member.id for member in voice_channel.members if not member.bot)
+            
+            # Store display names for all members
+            for member in voice_channel.members:
+                if not member.bot:
+                    state.user_display_names[member.id] = member.display_name
+            
+            # Check for active screen sharing
+            active_streamers = []
+            for member in voice_channel.members:
+                if not member.bot and member.voice:
+                    is_streaming = (
+                        member.voice.self_stream or
+                        member.voice.self_video or
+                        getattr(member.voice, 'self_video', False)
+                    )
+                    
+                    if is_streaming:
+                        active_streamers.append((member.id, voice_channel.id))
+                        logger.info(f"🎥 Detected streaming: {member.display_name}")
+            
+            # Handle streaming state changes
+            if active_streamers:
+                active_stream_found = True
+                primary_streamer, channel_id = active_streamers[0]
+                
+                if state.current_streamer != primary_streamer:
+                    # New streamer
+                    state.current_streamer = primary_streamer
+                    state.stream_start_time = datetime.now()
+                    state.current_viewers = current_members.copy()
+                    state.current_voice_channel = channel_id
+                    
+                    # Get streamer info with proper name
+                    streamer_member = voice_channel.guild.get_member(primary_streamer)
+                    if streamer_member:
+                        streamer_name = streamer_member.display_name
+                        state.user_display_names[primary_streamer] = streamer_name
+                    else:
+                        streamer_name = state.user_display_names.get(primary_streamer, f"User {primary_streamer}")
+                    
+                    state.streaming_media = f"{streamer_name}'s Stream"
+                    
+                    logger.info(f"🎥 Streaming started by {streamer_name} with {len(current_members)} viewers")
+                    
+                    # Initialize viewer sessions with proper names
+                    for viewer_id in state.current_viewers:
+                        if viewer_id not in state.viewer_sessions:
+                            viewer_member = voice_channel.guild.get_member(viewer_id)
+                            viewer_name = viewer_member.display_name if viewer_member else state.user_display_names.get(viewer_id, f"User {viewer_id}")
+                            state.user_display_names[viewer_id] = viewer_name
+                            
+                            state.viewer_sessions[viewer_id] = {
+                                "start_time": datetime.now(),
+                                "media": state.streaming_media,
+                                "duration": 0.0,
+                                "channel_id": channel_id
+                            }
+                            logger.info(f"👀 Started tracking viewer: {viewer_name}")
+                
+                else:
+                    # Same streamer, update viewers
+                    new_viewers = current_members - state.current_viewers
+                    left_viewers = state.current_viewers - current_members
+                    
+                    # Add new viewers
+                    for viewer_id in new_viewers:
+                        if viewer_id not in state.viewer_sessions:
+                            viewer_member = voice_channel.guild.get_member(viewer_id)
+                            viewer_name = viewer_member.display_name if viewer_member else state.user_display_names.get(viewer_id, f"User {viewer_id}")
+                            state.user_display_names[viewer_id] = viewer_name
+                            
+                            state.viewer_sessions[viewer_id] = {
+                                "start_time": datetime.now(),
+                                "media": state.streaming_media,
+                                "duration": 0.0,
+                                "channel_id": channel_id
+                            }
+                            logger.info(f"👀 New viewer joined: {viewer_name}")
+                    
+                    # Remove viewers who left and track their watch time
+                    for viewer_id in left_viewers:
+                        if viewer_id in state.viewer_sessions:
+                            session = state.viewer_sessions[viewer_id]
+                            watch_duration = (datetime.now() - session["start_time"]).total_seconds()
+                            
+                            # Track watch time with proper user info
+                            viewer_name = state.user_display_names.get(viewer_id, f"User {viewer_id}")
+                            track_viewer_watch_time(viewer_id, session["media"], watch_duration)
+                            
+                            logger.info(f"👋 Viewer left: {viewer_name} (watched for {watch_duration:.1f}s)")
+                            del state.viewer_sessions[viewer_id]
+                    
+                    # Update current viewers
+                    state.current_viewers = current_members.copy()
+                    logger.info(f"📊 Updated viewers: {len(state.current_viewers)} current viewers")
+        
+        # End session if no streams found
+        if not active_stream_found and state.current_streamer:
+            logger.info("🎥 Streaming ended")
+            end_streaming_session()
+        
+        state.last_stream_check = datetime.now()
+        
+    except Exception as e:
+        logger.error(f"Enhanced stream detection error: {e}")
+
+async def get_current_media_title() -> Optional[str]:
+    """Get the current media title from VLC"""
+    try:
+        status_data = await vlc.get_status()
+        if status_data and 'information' in status_data:
+            info = status_data['information']
+            if 'category' in info and 'meta' in info['category']:
+                meta = info['category']['meta']
+                return meta.get('filename', 'Unknown Media')
+        return None
+    except Exception as e:
+        logger.error(f"Error getting current media title: {e}")
+        return None
+
+def track_viewer_watch_time(user_id: int, media_title: str, duration: float):
+    """Track watch time for a viewer with proper accumulation"""
+    try:
+        logger.info(f"📊 Tracking watch time for user {user_id}: {duration:.1f}s for '{media_title}'")
+        
+        # Initialize user analytics if not exists
+        if user_id not in state.user_watch_time:
+            state.user_watch_time[user_id] = 0.0
+            logger.info(f"📊 Initialized watch time for user {user_id}")
+        
+        if user_id not in state.user_genre_preferences:
+            state.user_genre_preferences[user_id] = {}
+        
+        if user_id not in state.user_media_history:
+            state.user_media_history[user_id] = []
+        
+        # Add watch time (ensure it's a positive number)
+        if duration > 0:
+            # Update total watch time
+            old_total = state.user_watch_time[user_id]
+            state.user_watch_time[user_id] += duration
+            new_total = state.user_watch_time[user_id]
+            
+            logger.info(f"📊 Watch time updated: {old_total:.1f}s -> {new_total:.1f}s (+{duration:.1f}s) for user {user_id}")
+            
+            # Add to media history with actual duration
+            state.user_media_history[user_id].append({
+                "media": media_title,
+                "duration": duration,  # This should be the actual duration watched
+                "timestamp": datetime.now(),
+                "type": "stream_viewing"
+            })
+            
+            # Keep only last 100 entries
+            if len(state.user_media_history[user_id]) > 100:
+                state.user_media_history[user_id] = state.user_media_history[user_id][-100:]
+            
+            # Update daily stats
+            today = datetime.now().strftime('%Y-%m-%d')
+            if today not in state.daily_stats:
+                state.daily_stats[today] = {"total_watch_time": 0.0, "unique_users": set()}
+            
+            state.daily_stats[today]["total_watch_time"] += duration
+            state.daily_stats[today]["unique_users"].add(user_id)
+            
+            user_name = state.user_display_names.get(user_id, f"User {user_id}")
+            logger.info(f"📊 Successfully tracked {duration:.1f}s for {user_name}. Total: {new_total:.1f}s")
+        else:
+            logger.warning(f"📊 Skipped zero/negative duration: {duration}s for user {user_id}")
+        
+    except Exception as e:
+        logger.error(f"❌ Error tracking viewer watch time: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+
+def end_streaming_session():
+    """End the current streaming session and track final watch times"""
+    try:
+        if not state.current_streamer:
+            logger.info("📊 No current streamer to end session")
+            return
+        
+        current_time = datetime.now()
+        total_watch_time = 0
+        viewer_count = 0
+        
+        # Track final watch times for all current viewers
+        for viewer_id, session in list(state.viewer_sessions.items()):
+            if session["start_time"]:
+                watch_duration = (current_time - session["start_time"]).total_seconds()
+                if watch_duration > 0:
+                    logger.info(f"📊 Ending session for viewer {viewer_id}: {watch_duration:.1f}s")
+                    track_viewer_watch_time(viewer_id, session["media"], watch_duration)
+                    total_watch_time += watch_duration
+                    viewer_count += 1
+                else:
+                    logger.warning(f"📊 Zero duration for viewer {viewer_id}")
+            else:
+                logger.warning(f"📊 No start time for viewer {viewer_id}")
+        
+        # Record streaming session in history
+        if state.stream_start_time:
+            session_duration = (current_time - state.stream_start_time).total_seconds()
+            
+            # Convert viewer IDs to names for history
+            viewer_names = []
+            for viewer_id in state.current_viewers:
+                viewer_name = state.user_display_names.get(viewer_id, f"User {viewer_id}")
+                viewer_names.append(viewer_name)
+            
+            streamer_name = state.user_display_names.get(state.current_streamer, f"User {state.current_streamer}")
+            
+            state.stream_history.append({
+                "streamer": state.current_streamer,
+                "streamer_name": streamer_name,
+                "media": state.streaming_media,
+                "start_time": state.stream_start_time,
+                "end_time": current_time,
+                "duration": session_duration,
+                "total_watch_time": total_watch_time,
+                "viewers": list(state.current_viewers),
+                "viewer_names": viewer_names,
+                "viewer_count": len(state.current_viewers)
+            })
+            
+            # Keep only last 50 streaming sessions
+            if len(state.stream_history) > 50:
+                state.stream_history = state.stream_history[-50:]
+            
+            logger.info(f"📊 Session ended: {streamer_name} streamed for {session_duration:.1f}s, {viewer_count} viewers, total watch time: {total_watch_time:.1f}s")
+        else:
+            logger.warning("📊 No stream start time recorded")
+        
+        # Clear current streaming data
+        state.current_streamer = None
+        state.current_viewers.clear()
+        state.stream_start_time = None
+        state.streaming_media = None
+        state.viewer_sessions.clear()
+        
+        logger.info("📊 Streaming session cleared")
+        
+    except Exception as e:
+        logger.error(f"❌ Error ending streaming session: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+
 @bot.event
 async def on_voice_state_update(member, before, after):
-    """Handle voice channel state changes"""
+    """Handle voice channel state changes with better streaming detection"""
     if not Config.ENABLE_VOICE_SYNC or not Config.VOICE_CHANNEL_ID:
         return
     
-    # Check if member joined/left the target voice channel
     target_channel_id = Config.VOICE_CHANNEL_ID
     
-    # Member left the target channel
-    if before.channel and before.channel.id == target_channel_id:
-        logger.info(f"👋 {member.display_name} left voice channel")
+    try:
+        # Check if the update is relevant to our target channel
+        relevant_update = False
+        
+        # Member left target channel
+        if before.channel and before.channel.id == target_channel_id:
+            relevant_update = True
+            logger.info(f"👋 {member.display_name} left voice channel")
+        
+        # Member joined target channel
+        if after.channel and after.channel.id == target_channel_id:
+            relevant_update = True
+            logger.info(f"👋 {member.display_name} joined voice channel")
+        
+        # Member switched between channels (including to/from target)
+        if (before.channel and after.channel and 
+            (before.channel.id == target_channel_id or after.channel.id == target_channel_id)):
+            relevant_update = True
+        
+        if not relevant_update:
+            return
+        
+        # Update voice sync
         await check_voice_channel_sync()
-    
-    # Member joined the target channel
-    if after.channel and after.channel.id == target_channel_id:
-        logger.info(f"👋 {member.display_name} joined voice channel")
-        await check_voice_channel_sync()
+        
+        # Check for streaming changes with improved detection
+        if Config.ENABLE_STREAM_DETECTION:
+            await detect_voice_streaming_enhanced(member, before, after)
+            
+    except Exception as e:
+        logger.error(f"Voice state update error: {e}")
 
 @bot.event
 async def on_ready():
@@ -2445,6 +2868,11 @@ async def on_ready():
     if Config.ENABLE_VOICE_SYNC:
         voice_sync_task.start()
         logger.info("🔊 Voice channel sync enabled")
+    
+    # Start streaming detection task
+    if Config.ENABLE_STREAM_DETECTION:
+        stream_detection_task.start()
+        logger.info("🎥 Voice channel streaming detection enabled")
 
     # Debug: List all registered commands
     commands = bot.tree.get_commands()
@@ -2492,6 +2920,12 @@ async def voice_sync_task():
     """Periodically check voice channel sync"""
     if Config.ENABLE_VOICE_SYNC:
         await check_voice_channel_sync()
+
+@tasks.loop(seconds=Config.STREAM_DETECTION_INTERVAL)
+async def stream_detection_task():
+    """Periodically detect voice channel streaming and track viewers"""
+    if Config.ENABLE_STREAM_DETECTION:
+        await detect_voice_streaming_enhanced()
 
 @tasks.loop(seconds=Config.UPDATE_INTERVAL)
 async def update_status_embed():
@@ -3349,6 +3783,29 @@ async def my_stats_command(interaction: discord.Interaction):
                 inline=False
             )
         
+        # Current streaming status
+        if Config.ENABLE_STREAM_DETECTION:
+            if user_id in state.current_viewers:
+                streamer = bot.get_user(state.current_streamer) if state.current_streamer else None
+                streamer_name = streamer.display_name if streamer else f"User {state.current_streamer}"
+                embed.add_field(
+                    name="🎥 Currently Watching",
+                    value=f"**Streamer:** {streamer_name}\n**Media:** {state.streaming_media or 'Unknown'}\n**Status:** 👀 Active Viewer",
+                    inline=False
+                )
+            elif state.current_streamer:
+                embed.add_field(
+                    name="🎥 Streaming Status",
+                    value="Not currently watching any stream",
+                    inline=False
+                )
+            else:
+                embed.add_field(
+                    name="🎥 Streaming Status",
+                    value="No active stream",
+                    inline=False
+                )
+        
         await interaction.response.send_message(embed=embed, ephemeral=True)
         log_user_action(user_id, interaction.user.display_name, "view_my_stats")
         
@@ -3633,6 +4090,99 @@ async def trending_command(interaction: discord.Interaction):
         logger.error(f"Error in trending command: {e}")
         await interaction.response.send_message("❌ Failed to get trending recommendations.", ephemeral=True)
 
+@bot.tree.command(name="viewers", description="Show current stream viewers")
+async def viewers_command(interaction: discord.Interaction):
+    """Show who is currently watching the stream"""
+    try:
+        if not Config.ENABLE_STREAM_DETECTION:
+            await interaction.response.send_message("❌ Stream detection is not enabled.", ephemeral=True)
+            return
+        
+        if not state.current_streamer:
+            embed = discord.Embed(
+                title="🎥 No Active Stream",
+                description="No one is currently streaming in any voice channel.",
+                color=discord.Color.orange()
+            )
+            await interaction.response.send_message(embed=embed)
+            return
+        
+        # Get streamer info with proper name
+        streamer_name = state.user_display_names.get(state.current_streamer, f"User {state.current_streamer}")
+        
+        # Get viewer info with proper names
+        viewer_details = []
+        for viewer_id in state.current_viewers:
+            viewer_name = state.user_display_names.get(viewer_id, f"User {viewer_id}")
+            viewer_details.append(viewer_name)
+        
+        # Calculate stream duration
+        stream_duration = ""
+        total_seconds = 0
+        if state.stream_start_time:
+            total_seconds = (datetime.now() - state.stream_start_time).total_seconds()
+            hours, remainder = divmod(int(total_seconds), 3600)
+            minutes, seconds = divmod(remainder, 60)
+            stream_duration = f" ({hours:02d}:{minutes:02d}:{seconds:02d})"
+        
+        embed = discord.Embed(
+            title="🎥 Current Stream Viewers",
+            color=discord.Color.green(),
+            timestamp=datetime.now()
+        )
+        
+        # Stream info
+        embed.add_field(
+            name="📺 Stream Info",
+            value=f"**Streamer:** {streamer_name}\n**Media:** {state.streaming_media or 'Screen Share'}{stream_duration}",
+            inline=False
+        )
+        
+        # Viewers list - FIXED: Now properly displays viewers
+        if viewer_details:
+            viewers_text = "\n".join([f"👀 {viewer}" for viewer in viewer_details])
+            embed.add_field(
+                name=f"👥 Viewers ({len(viewer_details)})",
+                value=viewers_text,
+                inline=False
+            )
+            
+            # Add watch time info for current session
+            current_watch_times = []
+            for viewer_id in state.current_viewers:
+                if viewer_id in state.viewer_sessions:
+                    session = state.viewer_sessions[viewer_id]
+                    session_duration = (datetime.now() - session["start_time"]).total_seconds()
+                    viewer_name = state.user_display_names.get(viewer_id, f"User {viewer_id}")
+                    current_watch_times.append(f"• {viewer_name}: {seconds_to_time(session_duration)}")
+            
+            if current_watch_times:
+                embed.add_field(
+                    name="⏱️ Current Session Watch Time",
+                    value="\n".join(current_watch_times[:5]),  # Show first 5
+                    inline=False
+                )
+        else:
+            embed.add_field(
+                name="👥 Viewers",
+                value="No viewers currently",
+                inline=False
+            )
+        
+        # Session statistics
+        embed.add_field(
+            name="📊 Session Stats",
+            value=f"**Duration:** {seconds_to_time(total_seconds)}\n**Total Viewers:** {len(state.current_viewers)}",
+            inline=True
+        )
+        
+        await interaction.response.send_message(embed=embed)
+        logger.info(f"👥 Viewers command: {len(viewer_details)} viewers displayed")
+        
+    except Exception as e:
+        logger.error(f"Error in viewers command: {e}")
+        await interaction.response.send_message("❌ Failed to get viewer information.")
+
 @bot.tree.command(name="mobile_mode", description="Toggle mobile-optimized display")
 async def mobile_mode_command(interaction: discord.Interaction):
     """Toggle mobile-optimized display mode"""
@@ -3672,6 +4222,141 @@ async def mobile_mode_command(interaction: discord.Interaction):
     except Exception as e:
         logger.error(f"Error in mobile_mode command: {e}")
         await interaction.response.send_message("❌ Failed to get mobile mode info.", ephemeral=True)
+        
+@bot.tree.command(name="stream_debug", description="Debug streaming detection")
+async def stream_debug_command(interaction: discord.Interaction):
+    """Debug command to check streaming detection status"""
+    try:
+        if not Config.ENABLE_STREAM_DETECTION:
+            await interaction.response.send_message("❌ Stream detection is disabled.", ephemeral=True)
+            return
+        
+        if not Config.VOICE_CHANNEL_ID:
+            await interaction.response.send_message("❌ Voice channel not configured.", ephemeral=True)
+            return
+        
+        voice_channel = bot.get_channel(Config.VOICE_CHANNEL_ID)
+        if not voice_channel:
+            await interaction.response.send_message("❌ Voice channel not found.", ephemeral=True)
+            return
+        
+        # Get detailed voice channel info
+        embed = discord.Embed(
+            title="🔍 Streaming Debug Info",
+            color=discord.Color.blue(),
+            timestamp=datetime.now()
+        )
+        
+        # Voice channel info
+        embed.add_field(
+            name="🎧 Voice Channel",
+            value=f"**Name:** {voice_channel.name}\n**ID:** {voice_channel.id}\n**Members:** {len(voice_channel.members)}",
+            inline=False
+        )
+        
+        # Member details
+        member_details = []
+        for i, member in enumerate(voice_channel.members[:10]):  # Show first 10 members
+            status = "Bot" if member.bot else "User"
+            streaming = "🎥 Streaming" if (member.voice and (member.voice.self_stream or member.voice.self_video)) else "📱 Listening"
+            member_details.append(f"{i+1}. {member.display_name} ({status}) - {streaming}")
+        
+        if member_details:
+            embed.add_field(
+                name="👥 Channel Members",
+                value="\n".join(member_details),
+                inline=False
+            )
+        
+        # Streaming state
+        if state.current_streamer:
+            streamer = bot.get_user(state.current_streamer)
+            streamer_name = streamer.display_name if streamer else f"User {state.current_streamer}"
+            duration = ""
+            if state.stream_start_time:
+                total_seconds = (datetime.now() - state.stream_start_time).total_seconds()
+                duration = f" for {seconds_to_time(total_seconds)}"
+            
+            embed.add_field(
+                name="🎥 Current Stream",
+                value=f"**Streamer:** {streamer_name}\n**Media:** {state.streaming_media}\n**Viewers:** {len(state.current_viewers)}{duration}",
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="🎥 Current Stream",
+                value="No active stream detected",
+                inline=False
+            )
+        
+        # Voice state details for non-bot members
+        voice_states = []
+        for member in voice_channel.members:
+            if not member.bot and member.voice:
+                voice_states.append(
+                    f"**{member.display_name}:** "
+                    f"stream={member.voice.self_stream}, "
+                    f"video={member.voice.self_video}, "
+                    f"deaf={member.voice.self_deaf}, "
+                    f"mute={member.voice.self_mute}"
+                )
+        
+        if voice_states:
+            embed.add_field(
+                name="🎤 Voice States",
+                value="\n".join(voice_states)[:1024],  # Discord field limit
+                inline=False
+            )
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        
+    except Exception as e:
+        logger.error(f"Stream debug error: {e}")
+        await interaction.response.send_message(f"❌ Debug error: {e}", ephemeral=True)
+        
+@bot.tree.command(name="refresh_stream", description="Manually refresh streaming detection")
+async def refresh_stream_command(interaction: discord.Interaction):
+    """Manually refresh streaming detection"""
+    try:
+        await detect_voice_streaming_enhanced()
+        
+        if state.current_streamer:
+            streamer = bot.get_user(state.current_streamer)
+            streamer_name = streamer.display_name if streamer else f"User {state.current_streamer}"
+            await interaction.response.send_message(
+                f"✅ Stream detection refreshed. Current streamer: **{streamer_name}** with **{len(state.current_viewers)}** viewers.",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                "✅ Stream detection refreshed. No active stream detected.",
+                ephemeral=True
+            )
+            
+    except Exception as e:
+        logger.error(f"Refresh stream error: {e}")
+        await interaction.response.send_message(f"❌ Refresh failed: {e}", ephemeral=True)
+        
+@bot.tree.command(name="reset_stats", description="Reset viewing statistics (admin only)")
+async def reset_stats_command(interaction: discord.Interaction):
+    """Reset all viewing statistics"""
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ Only admins can reset statistics.", ephemeral=True)
+        return
+    
+    try:
+        # Reset watch time tracking
+        state.user_watch_time.clear()
+        state.user_genre_preferences.clear()
+        state.user_media_history.clear()
+        state.daily_stats.clear()
+        
+        await interaction.response.send_message("✅ All viewing statistics have been reset.", ephemeral=True)
+        logger.info(f"📊 Statistics reset by {interaction.user.display_name}")
+        
+    except Exception as e:
+        logger.error(f"Error resetting stats: {e}")
+        await interaction.response.send_message("❌ Failed to reset statistics.", ephemeral=True)
 
 @bot.event
 async def on_command_error(ctx, error):
