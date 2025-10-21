@@ -2446,27 +2446,46 @@ async def on_ready():
         voice_sync_task.start()
         logger.info("🔊 Voice channel sync enabled")
 
+    # Debug: List all registered commands
+    commands = bot.tree.get_commands()
+    logger.info(f"Found {len(commands)} commands before sync:")
+    for cmd in commands:
+        logger.info(f"  - {cmd.name}: {cmd.description}")
+    
     # Sync slash commands
-
     try:
-
         if Config.ALLOWED_GUILD_ID:
-
             guild = discord.Object(id=Config.ALLOWED_GUILD_ID)
-
             synced = await bot.tree.sync(guild=guild)
-
             logger.info(f"Synced {len(synced)} command(s) to guild {Config.ALLOWED_GUILD_ID}")
-
+            logger.info(f"Synced commands: {[cmd.name for cmd in synced]}")
         else:
-
             synced = await bot.tree.sync()
-
             logger.info(f"Synced {len(synced)} global command(s)")
-
+            logger.info(f"Synced commands: {[cmd.name for cmd in synced]}")
     except Exception as e:
-
         logger.error(f"Failed to sync commands: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+
+    # Add a manual sync command for debugging
+    @bot.tree.command(name="sync_commands", description="Manually sync slash commands")
+    async def sync_commands(interaction: discord.Interaction):
+        """Manually sync slash commands"""
+        if not is_admin(interaction.user):
+            await interaction.response.send_message("❌ Only admins can sync commands.", ephemeral=True)
+            return
+        
+        try:
+            if Config.ALLOWED_GUILD_ID:
+                guild = discord.Object(id=Config.ALLOWED_GUILD_ID)
+                synced = await bot.tree.sync(guild=guild)
+                await interaction.response.send_message(f"✅ Synced {len(synced)} command(s) to guild.", ephemeral=True)
+            else:
+                synced = await bot.tree.sync()
+                await interaction.response.send_message(f"✅ Synced {len(synced)} global command(s).", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Failed to sync commands: {e}", ephemeral=True)
 
 @tasks.loop(seconds=Config.VOICE_SYNC_CHECK_INTERVAL)
 async def voice_sync_task():
@@ -2571,6 +2590,12 @@ def status_has_changed(new_status: Dict, old_status: Dict) -> bool:
             return True
 
     return False
+
+# Test command to verify registration
+@bot.tree.command(name="test", description="Test command to verify slash commands are working")
+async def test_command(interaction: discord.Interaction):
+    """Simple test command"""
+    await interaction.response.send_message("✅ Slash commands are working!", ephemeral=True)
 
 # Slash commands
 
