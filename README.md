@@ -27,6 +27,10 @@ A powerful Discord bot that provides complete control over VLC Media Player thro
 - **Statistics Display**: View bot usage statistics
 - **Admin Controls**: Role-based permissions and overrides
 - **Connection Monitoring**: Automatic VLC reconnection handling
+- **Voice Channel Streaming Detection**: Automatically detect who is streaming in voice channels
+- **Viewer Tracking**: Track who is watching the current stream based on voice channel presence
+- **Smart Recommendations**: Enhanced recommendations based on streaming activity and viewer data
+- **Real-time Stats**: Live streaming statistics and viewer information
 
 ### 🛡️ Security & Permissions
 - **Role-based Access**: Restrict bot usage to specific roles
@@ -155,6 +159,12 @@ RECONNECT_DELAY=10
 ENABLE_MEDIA_INFO_SCRAPING=true
 SCRAPING_TIMEOUT=10
 
+# Voice Channel Streaming Detection
+ENABLE_STREAM_DETECTION=true
+STREAM_DETECTION_INTERVAL=5
+MIN_VIEWERS_FOR_TRACKING=1
+AUTO_TRACK_VIEWERS=true
+
 # Logging
 LOG_LEVEL=INFO
 LOG_TO_FILE=true
@@ -232,6 +242,33 @@ The bot automatically scrapes movie and TV show information from IMDb, displayin
 - Shows command history
 - Displays usage statistics
 - Maintains pause permissions (only pauser or admin can resume)
+
+#### Voice Channel Streaming Detection
+- **Automatic Stream Detection**: Detects when someone starts streaming in the voice channel
+- **Viewer Tracking**: Tracks who is watching the current stream based on voice channel presence
+- **Real-time Stats**: Shows current streamer, viewers, and streaming duration
+- **Smart Recommendations**: Enhanced recommendations based on what's currently being streamed
+- **Watch Time Tracking**: Accurately tracks viewing time for stream viewers
+- **Live Viewer List**: See who is currently watching with `/viewers` command
+
+## 🎯 Slash Commands
+
+The bot provides several slash commands for enhanced functionality:
+
+### 📊 Statistics Commands
+- `/my_stats` - View your personal viewing statistics
+- `/server_stats` - View server-wide statistics (admin only)
+- `/leaderboard` - View user activity leaderboard
+- `/viewers` - Show current stream viewers and streamer info
+
+### 🎬 Recommendation Commands
+- `/recommend` - Get personalized media recommendations
+- `/playlist_recommend` - Get recommendations based on current playlist
+- `/trending` - View trending media recommendations based on server activity
+
+### 🎮 Control Commands
+- `/mobile_mode` - Toggle mobile-optimized display
+- `/watch_party` - Update watch party information
 
 ## 🔧 Troubleshooting
 
