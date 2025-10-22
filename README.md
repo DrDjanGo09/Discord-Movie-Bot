@@ -6,7 +6,7 @@ A powerful Discord bot that provides complete control over VLC Media Player thro
 
 ### 🎮 Interactive Controls
 - **Button-based Interface**: Easy-to-use button controls (no slash commands needed)
-- **Real-time Updates**: Status updates every 6 seconds automatically
+- **Real-time Updates**: Status updates at a configurable interval (default 6s)
 - **Spotify-style Progress Bar**: Visual progress tracking with timestamps
 - **Media Information**: Automatic movie/TV show information scraping from IMDb
 
@@ -131,7 +131,7 @@ REQUIRED_ROLE_ID=role_id_for_bot_access
 BOT_STATUS_TYPE=watching
 BOT_STATUS_TEXT=movies with friends
 SHOW_PROGRESS_IN_STATUS=true
-UPDATE_INTERVAL=6
+UPDATE_INTERVAL=6 # Embed/status refresh interval in seconds
 
 # Security Settings
 ADMIN_ONLY_SEEK=false
@@ -182,6 +182,11 @@ LOG_FILE=vlc_bot.log
 - `EMBED_COLOR_*`: Hex colors for different playback states
 - `PROGRESS_BAR_LENGTH`: Length of progress bar (default: 25)
 - `SHOW_THUMBNAIL`: Show movie/TV posters (true/false)
+
+#### Media Info Scraping and Caching
+- The bot caches scraped media info and only re-scrapes when the playing title changes.
+- Cache hits are used silently to reduce log noise and external requests.
+- Set `ENABLE_MEDIA_INFO_SCRAPING=true` to enable scraping.
 
 ## 🚀 Usage
 
@@ -251,6 +256,7 @@ The bot automatically scrapes movie and TV show information from IMDb, displayin
    - Set `ENABLE_MEDIA_INFO_SCRAPING=true` in .env
    - Check internet connection for IMDb scraping
    - Some media files may not have available information
+   - If logs are noisy, lower `LOG_LEVEL` or rely on cache (re-scrape happens only on title change)
 
 4. **Buttons show "Application did not respond":**
    - Check button cooldown settings in .env
@@ -291,3 +297,11 @@ If you encounter issues:
 ---
 
 **Enjoy controlling your VLC Media Player through Discord! 🎉**
+
+## 📝 Changelog
+
+- 2025-10-22
+  - Add `beautifulsoup4` to requirements
+  - Embed footer reflects `UPDATE_INTERVAL`
+  - Gate scraping to title changes and use cache on repeats
+  - Relax filename cleaning to avoid over-truncation
