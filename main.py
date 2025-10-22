@@ -420,13 +420,19 @@ class VLCController:
         return await self._make_request("playlist.json")
 
     async def set_volume(self, volume: int) -> Optional[Dict]:
-        """Set VLC volume (0-100)"""
-        return await self._make_request("status.json", {"command": "volume", "val": str(volume)})
+        """Set VLC volume (0-100 mapped to 0-512)"""
+        # Map Discord's 0-100% to VLC's 0-512%
+        vlc_volume = int((volume / 100) * 512)
+        return await self._make_request("status.json", {"command": "volume", "val": str(vlc_volume)})
     
     async def get_volume(self) -> Optional[int]:
-        """Get current VLC volume"""
+        """Get current VLC volume (512 range mapped back to 0-100)"""
         status = await self.get_status()
-        return status.get('volume', 0) if status else None
+        if status and 'volume' in status:
+            vlc_volume = status['volume']
+            # Map VLC's 0-512 back to Discord's 0-100
+            return int((vlc_volume / 512) * 100)
+        return None
     
     async def set_playback_rate(self, rate: float) -> Optional[Dict]:
         """Set playback rate (0.25-4.0)"""
