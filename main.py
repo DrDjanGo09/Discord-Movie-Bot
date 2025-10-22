@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List, Set
 
 from dotenv import load_dotenv
+from logging.handlers import RotatingFileHandler
 
 import aiohttp
 
@@ -154,6 +155,14 @@ class Config:
     REACTION_EMOJIS = os.getenv('REACTION_EMOJIS', '👍👎❤️😂😮😢😡').split(',')
     MAX_COMMENT_LENGTH = int(os.getenv('MAX_COMMENT_LENGTH', '200'))
 
+    # Persistence
+    STATS_SAVE_PATH = os.getenv('STATS_SAVE_PATH', 'watch_stats.json')
+    STATS_SAVE_INTERVAL = int(os.getenv('STATS_SAVE_INTERVAL', '30'))
+
+    # Log rotation
+    LOG_MAX_BYTES = int(os.getenv('LOG_MAX_BYTES', str(1_000_000)))  # ~1MB
+    LOG_BACKUP_COUNT = int(os.getenv('LOG_BACKUP_COUNT', '3'))
+
 # Setup logging
 
 def setup_logging():
@@ -166,7 +175,14 @@ def setup_logging():
 
     if Config.LOG_TO_FILE:
 
-        handlers.append(logging.FileHandler(Config.LOG_FILE, encoding='utf-8'))
+        # Use rotating file handler to limit log file size
+        file_handler = RotatingFileHandler(
+            Config.LOG_FILE,
+            maxBytes=Config.LOG_MAX_BYTES,
+            backupCount=Config.LOG_BACKUP_COUNT,
+            encoding='utf-8'
+        )
+        handlers.append(file_handler)
 
     logging.basicConfig(
 
@@ -177,6 +193,10 @@ def setup_logging():
         handlers=handlers
 
     )
+    # Reduce noisy third-party loggers
+    logging.getLogger('discord').setLevel(logging.WARNING if level > logging.DEBUG else level)
+    logging.getLogger('aiohttp').setLevel(logging.WARNING)
+    logging.getLogger('urllib3').setLevel(logging.WARNING)
 
 setup_logging()
 
@@ -1140,6 +1160,15 @@ class BotState:
         self.recommendation_cache: Dict[str, List[Dict]] = {}  # user_id -> [recommendations]
         self.last_recommendation_update: Dict[str, datetime] = {}  # user_id -> last update time
 
+        # Server analytics
+        self.server_watch_time: Dict[int, float] = {}  # guild_id -> total watch time seconds
+        self.server_user_watch_time: Dict[int, Dict[int, float]] = {}  # guild_id -> {user_id -> seconds}
+        self.server_media_history: Dict[int, List[Dict]] = {}  # guild_id -> [{media, duration, user_id, timestamp}]
+        self.server_genre_preferences: Dict[int, Dict[str, int]] = {}  # guild_id -> {genre -> count}
+
+        # Persistence bookkeeping
+        self.last_save_time: Optional[datetime] = None
+
 state = BotState()
 
 def log_user_action(user_id: int, username: str, action: str):
@@ -1176,6 +1205,169 @@ def log_user_action(user_id: int, username: str, action: str):
     # Keep only last 50 commands in history
     if len(state.command_history) > 50:
         state.command_history = state.command_history[-50:]
+
+# --------------------
+# Persistence utilities
+# --------------------
+def _serialize_datetime(dt: Optional[datetime]) -> Optional[str]:
+    return dt.isoformat() if isinstance(dt, datetime) else None
+
+def _deserialize_datetime(s: Optional[str]) -> Optional[datetime]:
+    try:
+        return datetime.fromisoformat(s) if s else None
+    except Exception:
+        return None
+
+def serialize_state_for_save() -> Dict[str, Any]:
+    try:
+        # Convert complex objects to JSON-friendly structures
+        return {
+            "user_watch_time": state.user_watch_time,
+            "user_genre_preferences": state.user_genre_preferences,
+            "user_media_history": {
+                str(uid): [
+                    {
+                        "media": item.get("media"),
+                        "duration": float(item.get("duration", 0.0)),
+                        "timestamp": _serialize_datetime(item.get("timestamp")),
+                        "type": item.get("type")
+                    }
+                    for item in items
+                ]
+                for uid, items in state.user_media_history.items()
+            },
+            "daily_stats": {
+                day: {
+                    "total_watch_time": float(data.get("total_watch_time", 0.0)),
+                    "unique_users": list(data.get("unique_users", set()))
+                }
+                for day, data in state.daily_stats.items()
+            },
+            "stream_history": [
+                {
+                    "streamer": entry.get("streamer"),
+                    "streamer_name": entry.get("streamer_name"),
+                    "media": entry.get("media"),
+                    "start_time": _serialize_datetime(entry.get("start_time")),
+                    "end_time": _serialize_datetime(entry.get("end_time")),
+                    "duration": float(entry.get("duration", 0.0)),
+                    "total_watch_time": float(entry.get("total_watch_time", 0.0)),
+                    "viewers": entry.get("viewers", []),
+                    "viewer_names": entry.get("viewer_names", []),
+                }
+                for entry in state.stream_history
+            ],
+            # Server-level analytics
+            "server_watch_time": state.server_watch_time,
+            "server_user_watch_time": {
+                str(gid): {str(uid): float(sec) for uid, sec in users.items()}
+                for gid, users in state.server_user_watch_time.items()
+            },
+            "server_media_history": {
+                str(gid): [
+                    {
+                        "media": item.get("media"),
+                        "duration": float(item.get("duration", 0.0)),
+                        "user_id": item.get("user_id"),
+                        "timestamp": _serialize_datetime(item.get("timestamp"))
+                    }
+                    for item in items
+                ]
+                for gid, items in state.server_media_history.items()
+            },
+            "server_genre_preferences": state.server_genre_preferences,
+        }
+    except Exception as e:
+        logger.error(f"Error serializing state: {e}")
+        return {}
+
+def save_stats():
+    try:
+        payload = serialize_state_for_save()
+        path = Path(Config.STATS_SAVE_PATH)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        with tmp_path.open('w', encoding='utf-8') as f:
+            json.dump(payload, f, ensure_ascii=False)
+        tmp_path.replace(path)
+        state.last_save_time = datetime.now()
+        logger.debug(f"Saved stats to {path}")
+    except Exception as e:
+        logger.error(f"Failed to save stats: {e}")
+
+def load_stats():
+    try:
+        path = Path(Config.STATS_SAVE_PATH)
+        if not path.exists():
+            return
+        with path.open('r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        # Users
+        state.user_watch_time = {int(k): float(v) for k, v in data.get("user_watch_time", {}).items()}
+        state.user_genre_preferences = {
+            int(k): {g: int(c) for g, c in v.items()}
+            for k, v in data.get("user_genre_preferences", {}).items()
+        }
+        state.user_media_history = {
+            int(uid): [
+                {
+                    "media": item.get("media"),
+                    "duration": float(item.get("duration", 0.0)),
+                    "timestamp": _deserialize_datetime(item.get("timestamp")),
+                    "type": item.get("type")
+                }
+                for item in items
+            ]
+            for uid, items in data.get("user_media_history", {}).items()
+        }
+        state.daily_stats = {
+            day: {
+                "total_watch_time": float(stats.get("total_watch_time", 0.0)),
+                "unique_users": set(int(u) for u in stats.get("unique_users", []))
+            }
+            for day, stats in data.get("daily_stats", {}).items()
+        }
+        state.stream_history = [
+            {
+                "streamer": entry.get("streamer"),
+                "streamer_name": entry.get("streamer_name"),
+                "media": entry.get("media"),
+                "start_time": _deserialize_datetime(entry.get("start_time")),
+                "end_time": _deserialize_datetime(entry.get("end_time")),
+                "duration": float(entry.get("duration", 0.0)),
+                "total_watch_time": float(entry.get("total_watch_time", 0.0)),
+                "viewers": entry.get("viewers", []),
+                "viewer_names": entry.get("viewer_names", []),
+            }
+            for entry in data.get("stream_history", [])
+        ]
+
+        # Servers
+        state.server_watch_time = {int(g): float(sec) for g, sec in data.get("server_watch_time", {}).items()}
+        state.server_user_watch_time = {
+            int(gid): {int(uid): float(sec) for uid, sec in users.items()}
+            for gid, users in data.get("server_user_watch_time", {}).items()
+        }
+        state.server_media_history = {
+            int(gid): [
+                {
+                    "media": item.get("media"),
+                    "duration": float(item.get("duration", 0.0)),
+                    "user_id": int(item.get("user_id")) if item.get("user_id") is not None else None,
+                    "timestamp": _deserialize_datetime(item.get("timestamp"))
+                }
+                for item in items
+            ]
+            for gid, items in data.get("server_media_history", {}).items()
+        }
+        state.server_genre_preferences = {
+            int(gid): {g: int(c) for g, c in prefs.items()}
+            for gid, prefs in data.get("server_genre_preferences", {}).items()
+        }
+
+        logger.info("Loaded persisted watch stats")
+    except Exception as e:
+        logger.error(f"Failed to load stats: {e}")
 
 def track_watch_time(user_id: int, media_title: str, duration: float, genres: List[str] = None):
     """Track user watch time and preferences"""
@@ -2610,6 +2802,7 @@ async def detect_voice_streaming_enhanced(member=None, before=None, after=None):
                                 "media": state.streaming_media,
                                 "duration": 0.0,
                                 "channel_id": channel_id,
+                                "guild_id": voice_channel.guild.id,
                                 "last_tracked_time": datetime.now()
                             }
                             logger.info(f"👀 Started tracking viewer: {viewer_name} (ID: {viewer_id})")
@@ -2632,6 +2825,7 @@ async def detect_voice_streaming_enhanced(member=None, before=None, after=None):
                                 "media": state.streaming_media,
                                 "duration": 0.0,
                                 "channel_id": channel_id,
+                                "guild_id": voice_channel.guild.id,
                                 "last_tracked_time": datetime.now()
                             }
                             logger.info(f"👀 New viewer joined: {viewer_name} (ID: {viewer_id})")
@@ -2710,6 +2904,33 @@ def track_viewer_watch_time(user_id: int, media_title: str, duration: float):
                 "timestamp": datetime.now(),
                 "type": "stream_viewing"
             })
+
+            # Update server-level stats if we can infer guild
+            try:
+                # Find viewer's current session for guild info
+                session = state.viewer_sessions.get(user_id)
+                guild_id = session.get("guild_id") if session else None
+                if guild_id:
+                    # Total per server
+                    state.server_watch_time[guild_id] = state.server_watch_time.get(guild_id, 0.0) + duration
+                    # Per-user per server
+                    if guild_id not in state.server_user_watch_time:
+                        state.server_user_watch_time[guild_id] = {}
+                    state.server_user_watch_time[guild_id][user_id] = state.server_user_watch_time[guild_id].get(user_id, 0.0) + duration
+                    # Server media history
+                    if guild_id not in state.server_media_history:
+                        state.server_media_history[guild_id] = []
+                    state.server_media_history[guild_id].append({
+                        "media": media_title,
+                        "duration": duration,
+                        "user_id": user_id,
+                        "timestamp": datetime.now()
+                    })
+                    # Keep server media history manageable
+                    if len(state.server_media_history[guild_id]) > 500:
+                        state.server_media_history[guild_id] = state.server_media_history[guild_id][-500:]
+            except Exception as se:
+                logger.debug(f"Server stats update skipped: {se}")
             
             # Keep only last 100 entries
             if len(state.user_media_history[user_id]) > 100:
@@ -2933,6 +3154,12 @@ async def on_ready():
 
         logger.warning("✗ VLC connection failed - check configuration")
 
+    # Load persisted stats before starting loops
+    try:
+        load_stats()
+    except Exception as e:
+        logger.error(f"Failed to load stats on startup: {e}")
+
     # Start status update loop
 
     if Config.STATUS_CHANNEL_ID:
@@ -2949,6 +3176,14 @@ async def on_ready():
         stream_detection_task.start()
         logger.info("🎥 Voice channel streaming detection enabled")
         logger.info(f"📊 Watch time tracking interval: {Config.STREAM_DETECTION_INTERVAL} seconds")
+
+    # Start autosave loop
+    try:
+        autosave_stats_task.change_interval(seconds=Config.STATS_SAVE_INTERVAL)
+        autosave_stats_task.start()
+        logger.info(f"💾 Autosave enabled every {Config.STATS_SAVE_INTERVAL}s → {Config.STATS_SAVE_PATH}")
+    except Exception as e:
+        logger.error(f"Failed to start autosave task: {e}")
 
     # Debug: List all registered commands
     commands = bot.tree.get_commands()
@@ -3006,6 +3241,13 @@ async def stream_detection_task():
         if state.current_streamer and state.viewer_sessions:
             logger.debug(f"📊 Running periodic watch time tracking for {len(state.viewer_sessions)} viewers")
         track_active_viewers_watch_time()
+
+@tasks.loop(seconds=60)
+async def autosave_stats_task():
+    try:
+        save_stats()
+    except Exception as e:
+        logger.error(f"Autosave error: {e}")
 
 @tasks.loop(seconds=Config.UPDATE_INTERVAL)
 async def update_status_embed():
@@ -3142,50 +3384,87 @@ async def setup_command(interaction: discord.Interaction):
     logger.info(f"VLC control panel setup by {interaction.user.display_name}")
 
 @bot.tree.command(name="who_paused", description="Find out who paused the playback")
-
 async def who_paused(interaction: discord.Interaction):
-
     """Show who last paused the playback"""
-
     if state.last_pauser_id is None:
-
         await interaction.response.send_message("🎬 Playbook hasn't been paused yet.", ephemeral=True)
-
         return
-
     pauser_name = state.last_pauser_name or "Unknown"
-
     time_info = ""
-
     if state.last_pause_time:
-
         time_ago = datetime.now() - state.last_pause_time
-
         if time_ago.total_seconds() < 60:
-
             time_info = f" ({int(time_ago.total_seconds())} seconds ago)"
-
         elif time_ago.total_seconds() < 3600:
-
             time_info = f" ({int(time_ago.total_seconds()/60)} minutes ago)"
-
         else:
-
             time_info = f" ({int(time_ago.total_seconds()/3600)} hours ago)"
-
     embed = discord.Embed(
-
         title="⏸️ Last Paused By",
-
         description=f"**{pauser_name}** was the last to pause playback{time_info}.\n\nOnly this user or an admin can resume playback.",
-
         color=Config.EMBED_COLOR_PAUSED,
-
         timestamp=datetime.now()
-
     )
-
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="mystats", description="Show your watch stats and preferences")
+async def my_stats(interaction: discord.Interaction):
+    try:
+        user_id = interaction.user.id
+        analytics = get_user_analytics(user_id)
+        embed = discord.Embed(title=f"📊 {interaction.user.display_name}'s Stats", color=Config.EMBED_COLOR_PLAYING)
+        embed.add_field(name="Total Watch Time", value=analytics.get("watch_time_formatted", "0h 0m 0s"), inline=True)
+        top_genre = analytics.get("top_genre") or "—"
+        embed.add_field(name="Top Genre", value=top_genre, inline=True)
+        embed.add_field(name="Media Sessions", value=str(analytics.get("media_count", 0)), inline=True)
+        # Recent media
+        recent = analytics.get("recent_media", [])
+        if recent:
+            recent_lines = [f"• {item['title']} ({item['duration']})" for item in recent[-5:]]
+            embed.add_field(name="Recent", value="\n".join(recent_lines), inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Failed to fetch stats: {e}", ephemeral=True)
+
+@bot.tree.command(name="serverstats", description="Show server-wide watch stats")
+async def server_stats(interaction: discord.Interaction):
+    try:
+        if not interaction.guild:
+            await interaction.response.send_message("❌ Use this in a server.", ephemeral=True)
+            return
+        gid = interaction.guild.id
+        total = state.server_watch_time.get(gid, 0.0)
+        # Top users
+        top_lines = []
+        per_user = state.server_user_watch_time.get(gid, {})
+        if per_user:
+            top = sorted(per_user.items(), key=lambda kv: kv[1], reverse=True)[:5]
+            for uid, secs in top:
+                member = interaction.guild.get_member(uid)
+                name = member.display_name if member else f"User {uid}"
+                h = int(secs // 3600); m = int((secs % 3600) // 60)
+                top_lines.append(f"• {name}: {h}h {m}m")
+        # Top genres (server)
+        top_genres = []
+        genres = state.server_genre_preferences.get(gid, {})
+        if genres:
+            for g, c in sorted(genres.items(), key=lambda kv: kv[1], reverse=True)[:5]:
+                top_genres.append(f"• {g}: {c}")
+        # Build embed
+        h = int(total // 3600); m = int((total % 3600) // 60)
+        embed = discord.Embed(title=f"🏠 {interaction.guild.name} Stats", color=Config.EMBED_COLOR_PLAYING)
+        embed.add_field(name="Total Watch Time", value=f"{h}h {m}m", inline=True)
+        embed.add_field(name="Active Viewers", value=str(len(per_user)), inline=True)
+        if top_lines:
+            embed.add_field(name="Top Viewers", value="\n".join(top_lines), inline=False)
+        if top_genres:
+            embed.add_field(name="Top Genres", value="\n".join(top_genres), inline=False)
+        await interaction.response.send_message(embed=embed)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Failed to fetch server stats: {e}")
+
+# (Removed duplicate simple recommend command; using advanced recommend below)
+
 
 @bot.tree.command(name="force_play", description="Admin command to force resume playback")
 
