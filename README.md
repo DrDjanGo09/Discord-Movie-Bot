@@ -53,7 +53,7 @@ A powerful Discord bot that provides complete control over VLC Media Player thro
 Install all required packages using pip:
 
 ```bash
-pip install discord.py python-dotenv aiohttp requests beautifulsoup4
+pip install discord.py python-dotenv aiohttp beautifulsoup4
 ```
 Or install through requirements file:
 
@@ -65,8 +65,7 @@ pip install -r requirements.txt
 
 - **discord.py**: Discord API wrapper for Python
 - **python-dotenv**: Load environment variables from .env file
-- **aiohttp**: Asynchronous HTTP client for VLC API communication
-- **requests**: HTTP library for web requests
+- **aiohttp**: Asynchronous HTTP client for VLC API communication and media info scraping
 - **beautifulsoup4**: HTML parsing for media information scraping
 
 ### VLC Setup
