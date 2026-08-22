@@ -2,8 +2,6 @@ import discord
 
 from discord.ext import commands, tasks
 
-import requests
-
 import base64
 
 import json
@@ -15,7 +13,7 @@ import logging
 import asyncio
 import io
 
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from typing import Optional, Dict, Any, List, Set
 
@@ -1082,14 +1080,6 @@ class MediaScraper:
             logger.error(f"OMDB details error: {e}")
             return {}
     
-    async def _search_imdb_public(self, media_name: str) -> Dict[str, Any]:
-        """Legacy IMDb search method - redirects to enhanced version"""
-        return await self._search_imdb_enhanced(media_name)
-    
-    async def _get_imdb_details_public(self, movie_path: str) -> Dict[str, Any]:
-        """Legacy IMDb details method - redirects to enhanced version"""
-        return await self._get_imdb_details_enhanced(movie_path)
-    
     async def close(self):
         if self.session and not self.session.closed:
             await self.session.close()
@@ -1960,14 +1950,6 @@ async def get_playlist_info() -> List[Dict]:
 
         return []
 
-def is_mobile_user(user_agent: str = None) -> bool:
-    """Detect if user is on mobile (simplified detection)"""
-    # This is a simplified detection - in practice, you'd need more sophisticated detection
-    mobile_indicators = ['mobile', 'android', 'iphone', 'ipad', 'tablet']
-    if user_agent:
-        return any(indicator in user_agent.lower() for indicator in mobile_indicators)
-    return False
-
 async def create_vlc_embed(status_data: Optional[Dict] = None, last_action_by: str = None, action_type: str = None) -> discord.Embed:
     """Create comprehensive VLC status embed"""
 
@@ -2785,8 +2767,7 @@ async def detect_voice_streaming_enhanced(member=None, before=None, after=None):
                     state.current_streamer = primary_streamer
                     state.stream_start_time = datetime.now()
                     state.current_viewers = current_members.copy()
-                    state.current_voice_channel = channel_id
-                    
+
                     # Get streamer info with proper name
                     streamer_member = voice_channel.guild.get_member(primary_streamer)
                     if streamer_member:
@@ -2867,20 +2848,6 @@ async def detect_voice_streaming_enhanced(member=None, before=None, after=None):
         
     except Exception as e:
         logger.error(f"Enhanced stream detection error: {e}")
-
-async def get_current_media_title() -> Optional[str]:
-    """Get the current media title from VLC"""
-    try:
-        status_data = await vlc.get_status()
-        if status_data and 'information' in status_data:
-            info = status_data['information']
-            if 'category' in info and 'meta' in info['category']:
-                meta = info['category']['meta']
-                return meta.get('filename', 'Unknown Media')
-        return None
-    except Exception as e:
-        logger.error(f"Error getting current media title: {e}")
-        return None
 
 def track_viewer_watch_time(user_id: int, media_title: str, duration: float):
     """Track watch time for a viewer with proper accumulation"""
@@ -3427,63 +3394,8 @@ async def who_paused(interaction: discord.Interaction):
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="mystats", description="Show your watch stats and preferences")
-async def my_stats(interaction: discord.Interaction):
-    try:
-        user_id = interaction.user.id
-        analytics = get_user_analytics(user_id)
-        embed = discord.Embed(title=f"📊 {interaction.user.display_name}'s Stats", color=Config.EMBED_COLOR_PLAYING)
-        embed.add_field(name="Total Watch Time", value=analytics.get("watch_time_formatted", "0h 0m 0s"), inline=True)
-        top_genre = analytics.get("top_genre") or "—"
-        embed.add_field(name="Top Genre", value=top_genre, inline=True)
-        embed.add_field(name="Media Sessions", value=str(analytics.get("media_count", 0)), inline=True)
-        # Recent media
-        recent = analytics.get("recent_media", [])
-        if recent:
-            recent_lines = [f"• {item['title']} ({item['duration']})" for item in recent[-5:]]
-            embed.add_field(name="Recent", value="\n".join(recent_lines), inline=False)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-    except Exception as e:
-        await interaction.response.send_message(f"❌ Failed to fetch stats: {e}", ephemeral=True)
-
-@bot.tree.command(name="serverstats", description="Show server-wide watch stats")
-async def server_stats(interaction: discord.Interaction):
-    try:
-        if not interaction.guild:
-            await interaction.response.send_message("❌ Use this in a server.", ephemeral=True)
-            return
-        gid = interaction.guild.id
-        total = state.server_watch_time.get(gid, 0.0)
-        # Top users
-        top_lines = []
-        per_user = state.server_user_watch_time.get(gid, {})
-        if per_user:
-            top = sorted(per_user.items(), key=lambda kv: kv[1], reverse=True)[:5]
-            for uid, secs in top:
-                member = interaction.guild.get_member(uid)
-                name = member.display_name if member else f"User {uid}"
-                h = int(secs // 3600); m = int((secs % 3600) // 60)
-                top_lines.append(f"• {name}: {h}h {m}m")
-        # Top genres (server)
-        top_genres = []
-        genres = state.server_genre_preferences.get(gid, {})
-        if genres:
-            for g, c in sorted(genres.items(), key=lambda kv: kv[1], reverse=True)[:5]:
-                top_genres.append(f"• {g}: {c}")
-        # Build embed
-        h = int(total // 3600); m = int((total % 3600) // 60)
-        embed = discord.Embed(title=f"🏠 {interaction.guild.name} Stats", color=Config.EMBED_COLOR_PLAYING)
-        embed.add_field(name="Total Watch Time", value=f"{h}h {m}m", inline=True)
-        embed.add_field(name="Active Viewers", value=str(len(per_user)), inline=True)
-        if top_lines:
-            embed.add_field(name="Top Viewers", value="\n".join(top_lines), inline=False)
-        if top_genres:
-            embed.add_field(name="Top Genres", value="\n".join(top_genres), inline=False)
-        await interaction.response.send_message(embed=embed)
-    except Exception as e:
-        await interaction.response.send_message(f"❌ Failed to fetch server stats: {e}")
-
 # (Removed duplicate simple recommend command; using advanced recommend below)
+# (Removed duplicate /mystats and /serverstats - see /my_stats and /server_stats below)
 
 
 @bot.tree.command(name="force_play", description="Admin command to force resume playback")
