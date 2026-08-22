@@ -305,6 +305,10 @@ bot = commands.Bot(
 
 )
 
+# Tracks whether on_ready's one-time startup work has already run, since
+# on_ready can fire again after a reconnect and must not repeat it.
+_bot_ready_once = False
+
 class VLCController:
 
     """Enhanced VLC controller with connection pooling and error handling"""
@@ -3128,6 +3132,8 @@ async def on_voice_state_update(member, before, after):
 @bot.event
 async def on_ready():
 
+    global _bot_ready_once
+
     logger.info(f'{bot.user} has connected to Discord!')
 
     logger.info(f'Bot is ready to control VLC at {Config.VLC_HOST}:{Config.VLC_PORT}')
@@ -3143,6 +3149,14 @@ async def on_ready():
     if not Config.STATUS_CHANNEL_ID:
 
         logger.warning("STATUS_CHANNEL_ID not set - persistent embed will not work")
+
+    if _bot_ready_once:
+        # on_ready fires again after a reconnect - the one-time startup
+        # work below (task loops, command sync) must not run twice.
+        logger.info("Reconnected to Discord - skipping one-time startup steps")
+        return
+
+    _bot_ready_once = True
 
     # Add persistent view
 
@@ -3168,26 +3182,27 @@ async def on_ready():
 
     # Start status update loop
 
-    if Config.STATUS_CHANNEL_ID:
+    if Config.STATUS_CHANNEL_ID and not update_status_embed.is_running():
 
         update_status_embed.start()
-    
+
     # Start voice sync task
-    if Config.ENABLE_VOICE_SYNC:
+    if Config.ENABLE_VOICE_SYNC and not voice_sync_task.is_running():
         voice_sync_task.start()
         logger.info("🔊 Voice channel sync enabled")
-    
+
     # Start streaming detection task
-    if Config.ENABLE_STREAM_DETECTION:
+    if Config.ENABLE_STREAM_DETECTION and not stream_detection_task.is_running():
         stream_detection_task.start()
         logger.info("🎥 Voice channel streaming detection enabled")
         logger.info(f"📊 Watch time tracking interval: {Config.STREAM_DETECTION_INTERVAL} seconds")
 
     # Start autosave loop
     try:
-        autosave_stats_task.change_interval(seconds=Config.STATS_SAVE_INTERVAL)
-        autosave_stats_task.start()
-        logger.info(f"💾 Autosave enabled every {Config.STATS_SAVE_INTERVAL}s → {Config.STATS_SAVE_PATH}")
+        if not autosave_stats_task.is_running():
+            autosave_stats_task.change_interval(seconds=Config.STATS_SAVE_INTERVAL)
+            autosave_stats_task.start()
+            logger.info(f"💾 Autosave enabled every {Config.STATS_SAVE_INTERVAL}s → {Config.STATS_SAVE_PATH}")
     except Exception as e:
         logger.error(f"Failed to start autosave task: {e}")
 
@@ -3196,7 +3211,7 @@ async def on_ready():
     logger.info(f"Found {len(commands)} commands before sync:")
     for cmd in commands:
         logger.info(f"  - {cmd.name}: {cmd.description}")
-    
+
     # Sync slash commands
     try:
         if Config.ALLOWED_GUILD_ID:
@@ -3213,24 +3228,23 @@ async def on_ready():
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
 
-    # Add a manual sync command for debugging
-    @bot.tree.command(name="sync_commands", description="Manually sync slash commands")
-    async def sync_commands(interaction: discord.Interaction):
-        """Manually sync slash commands"""
-        if not is_admin(interaction.user):
-            await interaction.response.send_message("❌ Only admins can sync commands.", ephemeral=True)
-            return
-        
-        try:
-            if Config.ALLOWED_GUILD_ID:
-                guild = discord.Object(id=Config.ALLOWED_GUILD_ID)
-                synced = await bot.tree.sync(guild=guild)
-                await interaction.response.send_message(f"✅ Synced {len(synced)} command(s) to guild.", ephemeral=True)
-            else:
-                synced = await bot.tree.sync()
-                await interaction.response.send_message(f"✅ Synced {len(synced)} global command(s).", ephemeral=True)
-        except Exception as e:
-            await interaction.response.send_message(f"❌ Failed to sync commands: {e}", ephemeral=True)
+@bot.tree.command(name="sync_commands", description="Manually sync slash commands")
+async def sync_commands(interaction: discord.Interaction):
+    """Manually sync slash commands"""
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ Only admins can sync commands.", ephemeral=True)
+        return
+
+    try:
+        if Config.ALLOWED_GUILD_ID:
+            guild = discord.Object(id=Config.ALLOWED_GUILD_ID)
+            synced = await bot.tree.sync(guild=guild)
+            await interaction.response.send_message(f"✅ Synced {len(synced)} command(s) to guild.", ephemeral=True)
+        else:
+            synced = await bot.tree.sync()
+            await interaction.response.send_message(f"✅ Synced {len(synced)} global command(s).", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Failed to sync commands: {e}", ephemeral=True)
 
 @tasks.loop(seconds=Config.VOICE_SYNC_CHECK_INTERVAL)
 async def voice_sync_task():
