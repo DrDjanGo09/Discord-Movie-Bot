@@ -614,7 +614,7 @@ class MediaScraper:
                 if info.get('plot'):
                     logger.info(f"📖 Plot: {info['plot'][:100]}...")
             else:
-                logger.warning(f"❌ No media info found after all strategies")
+                logger.warning("❌ No media info found after all strategies")
             
             self.cache[cache_key] = info
             return info
@@ -841,8 +841,7 @@ class MediaScraper:
                         return {}
                     
                     title = title_elem.get_text().strip()
-                    link = title_elem.get('href', '')
-                    
+
                     # Get image
                     img_elem = result.select_one('img')
                     image_url = img_elem.get('src', '') if img_elem else ""
@@ -1673,8 +1672,7 @@ def get_playlist_recommendations(current_playlist: List[Dict]) -> List[Dict]:
         
         # Analyze current playlist genres (simplified)
         # In a real implementation, you'd analyze the actual media files
-        recommendations = []
-        
+
         # Get some general recommendations
         general_recs = [
             {"title": "Inception", "year": "2010", "rating": "8.8/10", "reason": "Mind-bending thriller"},
@@ -2265,13 +2263,20 @@ class VLCControlView(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         """Global check for all button interactions"""
-        if not self.has_required_role(interaction.user):
+        if Config.ALLOWED_GUILD_ID and interaction.guild_id != Config.ALLOWED_GUILD_ID:
             await interaction.response.send_message(
-                f"❌ You need the required role to use VLC controls.", 
+                "❌ This bot is not authorized for this server.",
                 ephemeral=True
             )
             return False
-        
+
+        if not self.has_required_role(interaction.user):
+            await interaction.response.send_message(
+                "❌ You need the required role to use VLC controls.",
+                ephemeral=True
+            )
+            return False
+
         if not self.check_cooldown(interaction.user.id):
             await interaction.response.send_message("⏱️ Please wait before using buttons again.", ephemeral=True)
             return False
