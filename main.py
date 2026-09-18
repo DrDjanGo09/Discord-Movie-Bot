@@ -1275,6 +1275,31 @@ def serialize_state_for_save() -> Dict[str, Any]:
                 for gid, items in state.server_media_history.items()
             },
             "server_genre_preferences": state.server_genre_preferences,
+            # Pause/resume ownership
+            "last_pauser_id": state.last_pauser_id,
+            "last_pauser_name": state.last_pauser_name,
+            "last_pause_time": _serialize_datetime(state.last_pause_time),
+            # User action / command history
+            "user_actions": {
+                str(uid): data
+                for uid, data in state.user_actions.items()
+            },
+            "command_history": state.command_history,
+            # Social features
+            "media_reactions": state.media_reactions,
+            "media_comments": {
+                filename: [
+                    {
+                        "user": comment.get("user"),
+                        "user_id": comment.get("user_id"),
+                        "comment": comment.get("comment"),
+                        "timestamp": _serialize_datetime(comment.get("timestamp")),
+                    }
+                    for comment in comments
+                ]
+                for filename, comments in state.media_comments.items()
+            },
+            "watch_party_members": list(state.watch_party_members),
         }
     except Exception as e:
         logger.error(f"Error serializing state: {e}")
@@ -1363,6 +1388,34 @@ def load_stats():
             int(gid): {g: int(c) for g, c in prefs.items()}
             for gid, prefs in data.get("server_genre_preferences", {}).items()
         }
+
+        # Pause/resume ownership
+        state.last_pauser_id = data.get("last_pauser_id")
+        state.last_pauser_name = data.get("last_pauser_name")
+        state.last_pause_time = _deserialize_datetime(data.get("last_pause_time"))
+
+        # User action / command history
+        state.user_actions = {
+            int(uid): user_data
+            for uid, user_data in data.get("user_actions", {}).items()
+        }
+        state.command_history = data.get("command_history", [])
+
+        # Social features
+        state.media_reactions = data.get("media_reactions", {})
+        state.media_comments = {
+            filename: [
+                {
+                    "user": comment.get("user"),
+                    "user_id": comment.get("user_id"),
+                    "comment": comment.get("comment"),
+                    "timestamp": _deserialize_datetime(comment.get("timestamp")),
+                }
+                for comment in comments
+            ]
+            for filename, comments in data.get("media_comments", {}).items()
+        }
+        state.watch_party_members = set(data.get("watch_party_members", []))
 
         logger.info("Loaded persisted watch stats")
     except Exception as e:
