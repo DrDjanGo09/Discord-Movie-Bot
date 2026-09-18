@@ -614,7 +614,7 @@ class MediaScraper:
                 if info.get('plot'):
                     logger.info(f"📖 Plot: {info['plot'][:100]}...")
             else:
-                logger.warning(f"❌ No media info found after all strategies")
+                logger.warning("❌ No media info found after all strategies")
             
             self.cache[cache_key] = info
             return info
@@ -841,8 +841,7 @@ class MediaScraper:
                         return {}
                     
                     title = title_elem.get_text().strip()
-                    link = title_elem.get('href', '')
-                    
+
                     # Get image
                     img_elem = result.select_one('img')
                     image_url = img_elem.get('src', '') if img_elem else ""
@@ -1276,6 +1275,31 @@ def serialize_state_for_save() -> Dict[str, Any]:
                 for gid, items in state.server_media_history.items()
             },
             "server_genre_preferences": state.server_genre_preferences,
+            # Pause/resume ownership
+            "last_pauser_id": state.last_pauser_id,
+            "last_pauser_name": state.last_pauser_name,
+            "last_pause_time": _serialize_datetime(state.last_pause_time),
+            # User action / command history
+            "user_actions": {
+                str(uid): data
+                for uid, data in state.user_actions.items()
+            },
+            "command_history": state.command_history,
+            # Social features
+            "media_reactions": state.media_reactions,
+            "media_comments": {
+                filename: [
+                    {
+                        "user": comment.get("user"),
+                        "user_id": comment.get("user_id"),
+                        "comment": comment.get("comment"),
+                        "timestamp": _serialize_datetime(comment.get("timestamp")),
+                    }
+                    for comment in comments
+                ]
+                for filename, comments in state.media_comments.items()
+            },
+            "watch_party_members": list(state.watch_party_members),
         }
     except Exception as e:
         logger.error(f"Error serializing state: {e}")
@@ -1364,6 +1388,34 @@ def load_stats():
             int(gid): {g: int(c) for g, c in prefs.items()}
             for gid, prefs in data.get("server_genre_preferences", {}).items()
         }
+
+        # Pause/resume ownership
+        state.last_pauser_id = data.get("last_pauser_id")
+        state.last_pauser_name = data.get("last_pauser_name")
+        state.last_pause_time = _deserialize_datetime(data.get("last_pause_time"))
+
+        # User action / command history
+        state.user_actions = {
+            int(uid): user_data
+            for uid, user_data in data.get("user_actions", {}).items()
+        }
+        state.command_history = data.get("command_history", [])
+
+        # Social features
+        state.media_reactions = data.get("media_reactions", {})
+        state.media_comments = {
+            filename: [
+                {
+                    "user": comment.get("user"),
+                    "user_id": comment.get("user_id"),
+                    "comment": comment.get("comment"),
+                    "timestamp": _deserialize_datetime(comment.get("timestamp")),
+                }
+                for comment in comments
+            ]
+            for filename, comments in data.get("media_comments", {}).items()
+        }
+        state.watch_party_members = set(data.get("watch_party_members", []))
 
         logger.info("Loaded persisted watch stats")
     except Exception as e:
@@ -1673,8 +1725,7 @@ def get_playlist_recommendations(current_playlist: List[Dict]) -> List[Dict]:
         
         # Analyze current playlist genres (simplified)
         # In a real implementation, you'd analyze the actual media files
-        recommendations = []
-        
+
         # Get some general recommendations
         general_recs = [
             {"title": "Inception", "year": "2010", "rating": "8.8/10", "reason": "Mind-bending thriller"},
@@ -2265,13 +2316,20 @@ class VLCControlView(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         """Global check for all button interactions"""
-        if not self.has_required_role(interaction.user):
+        if Config.ALLOWED_GUILD_ID and interaction.guild_id != Config.ALLOWED_GUILD_ID:
             await interaction.response.send_message(
-                f"❌ You need the required role to use VLC controls.", 
+                "❌ This bot is not authorized for this server.",
                 ephemeral=True
             )
             return False
-        
+
+        if not self.has_required_role(interaction.user):
+            await interaction.response.send_message(
+                "❌ You need the required role to use VLC controls.",
+                ephemeral=True
+            )
+            return False
+
         if not self.check_cooldown(interaction.user.id):
             await interaction.response.send_message("⏱️ Please wait before using buttons again.", ephemeral=True)
             return False
